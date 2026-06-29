@@ -1,0 +1,48 @@
+{
+  "name": "@0xmmo/crew",
+  "version": "0.1.0",
+  "description": "See your active Claude Code sessions at a glance — status, recap, and a transcript tail. Human view or agent-consumable NDJSON.",
+  "type": "commonjs",
+  "bin": {
+    "crew": "dist/crew.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "send": "npm run build && git add . && (git diff --cached --quiet || git commit -am checkpoint) && npm version patch && npm login && npm publish"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "cli",
+    "sessions",
+    "agents",
+    "terminal",
+    "ndjson"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0xmmo/crew.git"
+  },
+  "bugs": {
+    "url": "https://github.com/0xmmo/crew/issues"
+  },
+  "homepage": "https://github.com/0xmmo/crew#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.4.0"
+  }
+}
