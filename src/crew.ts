@@ -15,7 +15,7 @@
  */
 
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 
@@ -56,14 +56,25 @@ interface Opts {
   format: "text" | "json";
   full: boolean;
   tailN: number;
+  dir: string | null;
 }
 
 function parseArgs(argv: string[]): Opts {
-  const opts: Opts = { format: "text", full: false, tailN: 50 };
-  for (const a of argv) {
+  const opts: Opts = { format: "text", full: false, tailN: 50, dir: null };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
     if (a === "--json") opts.format = "json";
     else if (a === "--full") opts.full = true;
-    else if (a === "-h" || a === "--help") {
+    else if (a === "--dir") {
+      // Optional path; bare `--dir` means the current directory.
+      const next = argv[i + 1];
+      if (next && !next.startsWith("-") && !/^\d+$/.test(next)) {
+        opts.dir = resolve(next);
+        i++;
+      } else {
+        opts.dir = process.cwd();
+      }
+    } else if (a === "-h" || a === "--help") {
       printHelp();
       process.exit(0);
     } else if (/^\d+$/.test(a)) opts.tailN = parseInt(a, 10);
@@ -76,15 +87,25 @@ function parseArgs(argv: string[]): Opts {
   return opts;
 }
 
+/** True if cwd is dir or a descendant of it. dir=null matches everything. */
+function underDir(cwd: string, dir: string | null): boolean {
+  if (!dir) return true;
+  const strip = (p: string) => (p.length > 1 && p.endsWith("/") ? p.slice(0, -1) : p);
+  const c = strip(cwd);
+  const d = strip(dir);
+  return c === d || c.startsWith(d + "/");
+}
+
 function printHelp(): void {
   process.stdout.write(
     [
-      "crew — active Claude Code sessions at a glance",
+      "crew — simple multi-agent collaboration for Claude Code",
       "",
       "Usage:",
       "  crew [N]              human view, last N transcript entries (default 50)",
       "  crew --json [N]       NDJSON, one object per session (agent-consumable)",
       "  crew --json --full    NDJSON without tool input/output truncation",
+      "  crew --dir [path]     only sessions under <path> (default: current dir)",
       "  crew --help",
       "",
       "Env:",
@@ -238,7 +259,7 @@ function parseTranscript(path: string | null): Parsed {
 
 // ---------- discovery ----------
 
-function collectSessions(tailN: number): Session[] {
+function collectSessions(opts: Opts): Session[] {
   let files: string[];
   try {
     files = readdirSync(SESS_DIR).filter((f) => f.endsWith(".json"));
@@ -255,15 +276,17 @@ function collectSessions(tailN: number): Session[] {
     }
     const pid = Number(meta.pid);
     if (!pid) continue;
+    const cwd: string = meta.cwd ?? "";
+    if (!underDir(cwd, opts.dir)) continue; // outside the requested directory
+
     const cmd = processCommand(pid);
     if (cmd === null) continue; // dead / stale session file
     if (!cmd.includes("claude")) continue; // pid reused by something else
 
     const sid: string = meta.sessionId ?? "";
-    const cwd: string = meta.cwd ?? "";
     const transcript = findTranscript(cwd, sid);
     const parsed = parseTranscript(transcript);
-    const tail = parsed.entries.slice(-tailN);
+    const tail = parsed.entries.slice(-opts.tailN);
 
     sessions.push({
       pid,
@@ -360,7 +383,7 @@ function main(): void {
     process.stderr.write(`crew: no sessions dir at ${SESS_DIR}\n`);
     process.exit(1);
   }
-  const sessions = collectSessions(opts.tailN);
+  const sessions = collectSessions(opts);
   const out =
     opts.format === "json" ? renderJson(sessions, opts) : renderText(sessions, opts);
   process.stdout.write(out);

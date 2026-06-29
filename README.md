@@ -13,6 +13,8 @@ crew                  # human view, last 50 transcript entries per session
 crew 10               # last 10 entries
 crew --json           # NDJSON: one structured object per session
 crew --json --full    # NDJSON without tool input/output truncation
+crew --dir ~/work     # only sessions whose cwd is under ~/work
+crew --dir            # only sessions under the current directory
 crew --help
 ```
 
