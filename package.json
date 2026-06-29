@@ -1,7 +1,7 @@
 {
   "name": "@0xmmo/crew",
   "version": "0.1.0",
-  "description": "See your active Claude Code sessions at a glance — status, recap, and a transcript tail. Human view or agent-consumable NDJSON.",
+  "description": "Simple multi-agent collaboration for Claude Code — let one Claude see what your other running Claude sessions are doing, in the terminal or as JSON.",
   "type": "commonjs",
   "bin": {
     "crew": "dist/crew.js"

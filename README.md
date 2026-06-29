@@ -1,6 +1,6 @@
 # crew
 
-See your active [Claude Code](https://claude.com/claude-code) sessions at a glance. `crew` lists every running session with its status, recap, and a tail of its transcript — so you can tell what each open terminal is actually doing without switching to it. Installs the `crew` binary. `--json` emits agent-consumable NDJSON.
+Simple multi-agent collaboration for [Claude Code](https://claude.com/claude-code). `crew` lets one Claude see what your other running Claudes are doing — every live session's status, recap, and a tail of its transcript — from the terminal, or as NDJSON another agent can consume to coordinate. Installs the `crew` binary.
 
 ```sh
 npm install -g @0xmmo/crew
