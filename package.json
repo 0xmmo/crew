@@ -1,7 +1,7 @@
 {
   "name": "@0xmmo/crew",
   "version": "0.1.1",
-  "description": "Simple multi-agent collaboration for Claude Code — let one Claude see what your other running Claude sessions are doing, in the terminal or as JSON.",
+  "description": "Shared context for Claude Code agents — auto-injects what your other running sessions are doing into every session's context via hooks. Also a CLI to watch them yourself.",
   "type": "commonjs",
   "bin": {
     "crew": "dist/crew.js"
@@ -17,11 +17,15 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "postinstall": "node dist/postinstall.js || true",
     "send": "npm run build && git add . && (git diff --cached --quiet || git commit -am checkpoint) && npm version patch && npm login && npm publish"
   },
   "keywords": [
     "claude",
     "claude-code",
+    "hooks",
+    "context",
+    "multi-agent",
     "cli",
     "sessions",
     "agents",

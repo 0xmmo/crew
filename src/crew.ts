@@ -1,12 +1,20 @@
 #!/usr/bin/env node
 /**
- * crew — list active Claude Code sessions with status, recap, and a transcript tail.
+ * crew — shared context for Claude Code agents.
+ *
+ * First and foremost a Claude Code hook: `crew --hook` reads the hook event on
+ * stdin and emits what your other running sessions are doing (status, recap,
+ * transcript tail) as additionalContext, so every session automatically sees
+ * the rest of the crew. Also a CLI for watching the same thing yourself.
  *
  * Every interactive Claude Code session writes ~/.claude/sessions/<pid>.json while
  * running. crew reads those, keeps the ones whose pid is still a live `claude`
  * process, then pulls each session's recap (the latest `away_summary`) and a tail
  * of its transcript.
  *
+ *   crew --hook          hook mode: emit other sessions as additionalContext JSON
+ *   crew install-hook    wire `crew --hook` into Claude Code settings.json
+ *   crew uninstall-hook  remove it
  *   crew                 human view, last 50 transcript entries per session
  *   crew 10              human view, last 10 entries
  *   crew --json          NDJSON: one structured object per session (agent-friendly)
@@ -14,10 +22,18 @@
  *   crew --help
  */
 
-import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+  HOOK_COMMAND,
+  hookInstalled,
+  installHook,
+  settingsPath,
+  uninstallHook,
+} from "./settings";
 
 const CLAUDE_HOME = process.env.CLAUDE_HOME || join(homedir(), ".claude");
 const SESS_DIR = join(CLAUDE_HOME, "sessions");
@@ -52,19 +68,33 @@ interface Session {
 
 // ---------- args ----------
 
+type Mode = "list" | "hook" | "install-hook" | "uninstall-hook";
+
 interface Opts {
+  mode: Mode;
   format: "text" | "json";
   full: boolean;
   tailN: number;
+  tailSet: boolean;
   dir: string | null;
 }
 
 function parseArgs(argv: string[]): Opts {
-  const opts: Opts = { format: "text", full: false, tailN: 50, dir: null };
+  const opts: Opts = {
+    mode: "list",
+    format: "text",
+    full: false,
+    tailN: 50,
+    tailSet: false,
+    dir: null,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--json") opts.format = "json";
     else if (a === "--full") opts.full = true;
+    else if (a === "--hook") opts.mode = "hook";
+    else if (a === "install-hook") opts.mode = "install-hook";
+    else if (a === "uninstall-hook") opts.mode = "uninstall-hook";
     else if (a === "--dir") {
       // Optional path; bare `--dir` means the current directory.
       const next = argv[i + 1];
@@ -77,8 +107,10 @@ function parseArgs(argv: string[]): Opts {
     } else if (a === "-h" || a === "--help") {
       printHelp();
       process.exit(0);
-    } else if (/^\d+$/.test(a)) opts.tailN = parseInt(a, 10);
-    else {
+    } else if (/^\d+$/.test(a)) {
+      opts.tailN = parseInt(a, 10);
+      opts.tailSet = true;
+    } else {
       process.stderr.write(`crew: unknown argument '${a}'\n`);
       printHelp();
       process.exit(2);
@@ -99,9 +131,15 @@ function underDir(cwd: string, dir: string | null): boolean {
 function printHelp(): void {
   process.stdout.write(
     [
-      "crew — simple multi-agent collaboration for Claude Code",
+      "crew — shared context for Claude Code agents",
       "",
-      "Usage:",
+      "Hook (auto-injects other sessions into Claude Code context):",
+      "  crew --hook [N]       read a hook event on stdin, emit other sessions as",
+      "                        additionalContext JSON (default N=5 tail entries)",
+      "  crew install-hook     wire `crew --hook` into Claude Code settings.json",
+      "  crew uninstall-hook   remove it",
+      "",
+      "CLI:",
       "  crew [N]              human view, last N transcript entries (default 50)",
       "  crew --json [N]       NDJSON, one object per session (agent-consumable)",
       "  crew --json --full    NDJSON without tool input/output truncation",
@@ -110,6 +148,7 @@ function printHelp(): void {
       "",
       "Env:",
       "  CLAUDE_HOME           override ~/.claude",
+      "  CREW_NO_HOOK=1        skip hook auto-install on `npm i -g`",
       "",
     ].join("\n"),
   );
@@ -375,10 +414,145 @@ function renderJson(sessions: Session[], opts: Opts): string {
   );
 }
 
+// ---------- hook mode ----------
+
+interface HookInput {
+  session_id?: string;
+  hook_event_name?: string;
+}
+
+function readHookInput(): HookInput {
+  if (process.stdin.isTTY) return {};
+  try {
+    const raw = readFileSync(0, "utf8");
+    const parsed = raw.trim() ? JSON.parse(raw) : {};
+    return typeof parsed === "object" && parsed !== null ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function renderHookContext(sessions: Session[]): string {
+  const MAX_SESSIONS = 8;
+  const shown = sessions.slice(0, MAX_SESSIONS);
+  const lines: string[] = [
+    `${sessions.length} other Claude Code session(s) running on this machine right now. ` +
+      "Consider them before starting overlapping work; run `crew` for the full view.",
+  ];
+  for (const s of shown) {
+    lines.push("");
+    lines.push(`• ${s.shortId} — ${s.status || "unknown"} — ${s.cwd}`);
+    if (s.recap) lines.push(`  recap: ${trunc(s.recap, 300, false)}`);
+    for (const e of s.tail) {
+      const t = localHHMM(e.ts);
+      if (e.kind === "tool_use") {
+        lines.push(`  ${t} ⚙ ${e.name}: ${trunc(e.summary ?? "", 120, false)}`);
+      } else if (e.kind === "tool_result") {
+        lines.push(`  ${t} ⟲ ${trunc(e.text ?? "", 160, false)}`);
+      } else {
+        const glyph = e.role === "user" ? "›" : "‹";
+        lines.push(`  ${t} ${glyph} ${trunc(e.text ?? "", 200, false)}`);
+      }
+    }
+  }
+  if (sessions.length > shown.length) {
+    lines.push("");
+    lines.push(`…and ${sessions.length - shown.length} more.`);
+  }
+  return lines.join("\n");
+}
+
+// On UserPromptSubmit the same status would otherwise be re-injected every
+// message; remember a hash of the last emit per session and stay silent while
+// nothing has changed.
+function emitStampPath(sid: string): string {
+  const safe = (sid || "unknown").replace(/[^a-zA-Z0-9-]/g, "_");
+  return join(tmpdir(), `crew-hook-${safe}`);
+}
+
+function contextHash(context: string): string {
+  return createHash("sha256").update(context).digest("hex");
+}
+
+function unchangedSinceLastEmit(sid: string, context: string): boolean {
+  try {
+    return readFileSync(emitStampPath(sid), "utf8") === contextHash(context);
+  } catch {
+    return false;
+  }
+}
+
+function rememberEmit(sid: string, context: string): void {
+  try {
+    writeFileSync(emitStampPath(sid), contextHash(context));
+  } catch {
+    // best effort; worst case we re-emit next prompt
+  }
+}
+
+function runHook(opts: Opts): void {
+  // Never exit non-zero: exit 2 on UserPromptSubmit would block the prompt.
+  try {
+    const input = readHookInput();
+    const event =
+      input.hook_event_name === "UserPromptSubmit" ? "UserPromptSubmit" : "SessionStart";
+    if (!opts.tailSet) opts.tailN = 5;
+    const sid = typeof input.session_id === "string" ? input.session_id : "";
+    const sessions = collectSessions(opts).filter(
+      (s) => s.sessionId !== sid && s.pid !== process.ppid,
+    );
+    if (sessions.length === 0) return; // nothing to inject, zero tokens spent
+    const context = renderHookContext(sessions);
+    if (event === "UserPromptSubmit" && unchangedSinceLastEmit(sid, context)) return;
+    rememberEmit(sid, context);
+    process.stdout.write(
+      JSON.stringify({
+        hookSpecificOutput: { hookEventName: event, additionalContext: context },
+      }) + "\n",
+    );
+  } catch {
+    // swallow everything; a broken hook must not break the session
+  }
+}
+
+// ---------- settings commands ----------
+
+function runSettingsCommand(mode: "install-hook" | "uninstall-hook"): void {
+  const path = settingsPath();
+  try {
+    if (mode === "install-hook") {
+      const r = installHook(path);
+      process.stdout.write(
+        r === "installed"
+          ? `crew: wired \`${HOOK_COMMAND}\` into ${path} (SessionStart + UserPromptSubmit).\n`
+          : `crew: hook already installed in ${path}.\n`,
+      );
+    } else {
+      const r = uninstallHook(path);
+      process.stdout.write(
+        r === "removed"
+          ? `crew: hook removed from ${path}.\n`
+          : `crew: no crew hook found in ${path}.\n`,
+      );
+    }
+  } catch (err) {
+    process.stderr.write(`crew: ${(err as Error).message}\n`);
+    process.exit(1);
+  }
+}
+
 // ---------- main ----------
 
 function main(): void {
   const opts = parseArgs(process.argv.slice(2));
+  if (opts.mode === "install-hook" || opts.mode === "uninstall-hook") {
+    runSettingsCommand(opts.mode);
+    return;
+  }
+  if (opts.mode === "hook") {
+    runHook(opts);
+    return;
+  }
   if (!existsSync(SESS_DIR)) {
     process.stderr.write(`crew: no sessions dir at ${SESS_DIR}\n`);
     process.exit(1);
@@ -387,6 +561,20 @@ function main(): void {
   const out =
     opts.format === "json" ? renderJson(sessions, opts) : renderText(sessions, opts);
   process.stdout.write(out);
+  // The whole point of crew is the auto-injected context; npm hides postinstall
+  // output (and ignore-scripts blocks it entirely), so the human view is the one
+  // reliable place to tell people the hook isn't wired yet. Text mode only —
+  // --json output is consumed by agents.
+  if (
+    opts.format === "text" &&
+    process.env.CREW_NO_HOOK !== "1" &&
+    !hookInstalled()
+  ) {
+    process.stderr.write(
+      "\ncrew: context hook not installed — your Claude Code sessions can't see each other yet.\n" +
+        `crew: run \`crew install-hook\` to wire \`${HOOK_COMMAND}\` into ${settingsPath()}.\n`,
+    );
+  }
 }
 
 main();
