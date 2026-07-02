@@ -1,6 +1,6 @@
 {
   "name": "@0xmmo/crew",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Shared context for Claude Code agents — auto-injects what your other running sessions are doing into every session's context via hooks. Also a CLI to watch them yourself.",
   "type": "commonjs",
   "bin": {
