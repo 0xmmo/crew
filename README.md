@@ -14,7 +14,7 @@ That's the whole setup: installing globally wires the hook into `~/.claude/setti
 
 From then on, every Claude Code session starts with (and keeps getting, as things change) a context block like:
 
-```
+```yaml
 2 other Claude Code session(s) running on this machine right now. Consider them
 before starting overlapping work; run `crew` for the full view.
 
@@ -33,7 +33,7 @@ that agent's context within seconds.
 
 So when an agent in one session is about to touch files another session is mid-way through, it knows — and it knows how to say something about it. A `crew send` from another agent (or from you in a plain terminal) lands the same way, even mid-turn:
 
-```
+```yaml
 📨 Message from 4d3de8db (/Users/you/Projects/api, sent 2m ago):
   heads up — refactoring src/settings.ts, hold off for 20 min
 Reply with: `crew send 4d3de8db "text"`
@@ -124,7 +124,7 @@ crew inbox            # your own pending messages
 crew --help
 ```
 
-```
+```yaml
 🔵  4d3de8db   pid 66643   status: busy
    cwd: /Users/you/Projects/api
    started: 6/28/2026, 4:40:36 PM
