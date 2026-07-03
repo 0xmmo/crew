@@ -1,6 +1,6 @@
 # crew
 
-Let your [Claude Code](https://claude.com/claude-code) agents coordinate and ship multiple features concurrently — no branching, no worktrees.
+Let [Claude Code](https://claude.com/claude-code) agents coordinate with shared context and agent-to-agent messaging. No branches. No worktrees.
 
 crew auto-injects what your other running Claude Code sessions are doing — status, recap, and a tail of each transcript — into every session's context. Agents see each other's in-flight work and steer around it, so parallel sessions work from one shared checkout instead of needing a worktree each. Agents can also message each other directly with `crew send`. There's a CLI for watching all of it yourself.
 
