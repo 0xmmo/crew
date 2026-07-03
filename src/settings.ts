@@ -23,6 +23,12 @@ export const HOOK_EVENTS = [
   "Stop",
 ] as const;
 
+/** Display a path with the home directory shortened to ~. */
+export function tildify(path: string): string {
+  const home = homedir();
+  return path.startsWith(home) ? "~" + path.slice(home.length) : path;
+}
+
 export function settingsPath(): string {
   const dir =
     process.env.CLAUDE_CONFIG_DIR ||

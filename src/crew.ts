@@ -34,6 +34,7 @@ import {
   hookInstalled,
   installHook,
   settingsPath,
+  tildify,
   uninstallHook,
 } from "./settings";
 import {
@@ -763,20 +764,21 @@ function runHook(opts: Opts): void {
 
 function runSettingsCommand(mode: "install-hook" | "uninstall-hook"): void {
   const path = settingsPath();
+  const shown = tildify(path);
   try {
     if (mode === "install-hook") {
       const r = installHook(path);
       process.stdout.write(
         r === "installed"
-          ? `crew: wired \`${HOOK_COMMAND}\` into ${path} (SessionStart + UserPromptSubmit).\n`
-          : `crew: hook already installed in ${path}.\n`,
+          ? "✓ crew wired into Claude Code — your sessions now see each other. Undo: crew uninstall-hook\n"
+          : "✓ already wired — nothing to change.\n",
       );
     } else {
       const r = uninstallHook(path);
       process.stdout.write(
         r === "removed"
-          ? `crew: hook removed from ${path}.\n`
-          : `crew: no crew hook found in ${path}.\n`,
+          ? "✓ crew hook removed.\n"
+          : `crew: no hook found in ${shown} — nothing to remove.\n`,
       );
     }
   } catch (err) {
