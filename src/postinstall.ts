@@ -19,7 +19,7 @@ function main(): void {
   try {
     if (installHook(path) === "installed") {
       process.stdout.write(
-        `crew: wired \`${HOOK_COMMAND}\` into ${path} (SessionStart + UserPromptSubmit).\n` +
+        `crew: wired \`${HOOK_COMMAND}\` into ${path} (context + messaging hooks).\n` +
           "crew: your Claude Code sessions now see each other. Remove with `crew uninstall-hook`;\n" +
           "crew: install with CREW_NO_HOOK=1 to skip this step.\n",
       );

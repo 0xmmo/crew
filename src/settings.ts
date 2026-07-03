@@ -3,7 +3,9 @@
  *
  * Adds `crew --hook` under SessionStart (no matcher = every source, including
  * post-compaction re-injection) and UserPromptSubmit, so each session sees
- * what the other running sessions are doing. Merges into the existing
+ * what the other running sessions are doing — plus PostToolUse and Stop,
+ * which only deliver `crew send` messages (cheap inbox check, silent when
+ * empty) so mail reaches a busy agent mid-turn. Merges into the existing
  * settings.json without touching anything else; never writes over a file it
  * could not parse.
  */
@@ -14,7 +16,12 @@ import { homedir } from "node:os";
 
 export const HOOK_COMMAND = "crew --hook";
 
-const HOOK_EVENTS = ["SessionStart", "UserPromptSubmit"] as const;
+export const HOOK_EVENTS = [
+  "SessionStart",
+  "UserPromptSubmit",
+  "PostToolUse",
+  "Stop",
+] as const;
 
 export function settingsPath(): string {
   const dir =

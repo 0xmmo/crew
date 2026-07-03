@@ -1,7 +1,7 @@
 {
   "name": "@0xmmo/crew",
   "version": "0.1.4",
-  "description": "Shared context for Claude Code agents — auto-injects what your other running sessions are doing into every session's context via hooks. Also a CLI to watch them yourself.",
+  "description": "Let Claude Code agents coordinate and ship multiple features concurrently — no branching, no worktrees. Auto-injects what your other running sessions are doing into every session's context, with agent-to-agent messaging via `crew send`; CLI included.",
   "type": "commonjs",
   "bin": {
     "crew": "dist/crew.js"

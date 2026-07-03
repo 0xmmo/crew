@@ -15,6 +15,8 @@
  *   crew --hook          hook mode: emit other sessions as additionalContext JSON
  *   crew install-hook    wire `crew --hook` into Claude Code settings.json
  *   crew uninstall-hook  remove it
+ *   crew send <t> "msg"  message another session (delivered via its hook)
+ *   crew inbox           peek at this session's pending messages
  *   crew                 human view, last 50 transcript entries per session
  *   crew 10              human view, last 10 entries
  *   crew --json          NDJSON: one structured object per session (agent-friendly)
@@ -34,6 +36,15 @@ import {
   settingsPath,
   uninstallHook,
 } from "./settings";
+import {
+  DEFAULT_TTL_MS,
+  Message,
+  drainInbox,
+  peekInbox,
+  pendingCount,
+  pruneInboxes,
+  sendMessage,
+} from "./mailbox";
 
 const CLAUDE_HOME = process.env.CLAUDE_HOME || join(homedir(), ".claude");
 const SESS_DIR = join(CLAUDE_HOME, "sessions");
@@ -64,6 +75,7 @@ interface Session {
   messageCount: number;
   tailCount: number;
   tail: Entry[];
+  pendingMessages: number;
 }
 
 // ---------- args ----------
@@ -131,13 +143,19 @@ function underDir(cwd: string, dir: string | null): boolean {
 function printHelp(): void {
   process.stdout.write(
     [
-      "crew — shared context for Claude Code agents",
+      "crew — shared context and messaging for Claude Code agents",
       "",
       "Hook (auto-injects other sessions into Claude Code context):",
       "  crew --hook [N]       read a hook event on stdin, emit other sessions as",
       "                        additionalContext JSON (default N=5 tail entries)",
       "  crew install-hook     wire `crew --hook` into Claude Code settings.json",
       "  crew uninstall-hook   remove it",
+      "",
+      "Messaging (delivered into the target agent's context via the hook):",
+      '  crew send <t> "msg"   t = shortId prefix, pid, or cwd substring',
+      '  crew send --all "msg" broadcast to every other live session',
+      "  crew send --ttl 30m   expire undelivered mail (default 24h)",
+      "  crew inbox            peek at this session's pending messages",
       "",
       "CLI:",
       "  crew [N]              human view, last N transcript entries (default 50)",
@@ -342,11 +360,173 @@ function collectSessions(opts: Opts): Session[] {
       messageCount: parsed.total,
       tailCount: tail.length,
       tail,
+      pendingMessages: pendingCount(sid),
     });
   }
   // Most-recently-started first.
   sessions.sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? ""));
   return sessions;
+}
+
+// ---------- messaging ----------
+
+interface SessionRef {
+  pid: number;
+  sessionId: string;
+  cwd: string;
+}
+
+/** Lightweight session list (no transcripts): live claude pids only. */
+function listSessionRefs(): SessionRef[] {
+  let files: string[];
+  try {
+    files = readdirSync(SESS_DIR).filter((f) => f.endsWith(".json"));
+  } catch {
+    return [];
+  }
+  const refs: SessionRef[] = [];
+  for (const f of files) {
+    try {
+      const meta = JSON.parse(readFileSync(join(SESS_DIR, f), "utf8"));
+      const pid = Number(meta.pid);
+      if (!pid || typeof meta.sessionId !== "string") continue;
+      const cmd = processCommand(pid);
+      if (!cmd || !cmd.includes("claude")) continue;
+      refs.push({ pid, sessionId: meta.sessionId, cwd: meta.cwd ?? "" });
+    } catch {
+      continue;
+    }
+  }
+  return refs;
+}
+
+function parentPid(pid: number): number | null {
+  try {
+    const out = execFileSync("ps", ["-p", String(pid), "-o", "ppid="], {
+      encoding: "utf8",
+    }).trim();
+    const p = parseInt(out, 10);
+    return Number.isFinite(p) && p > 1 ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The session this process is running inside, found by walking up the process
+ * tree until a pid matches a live session — attributes `crew send` run from an
+ * agent's shell to that agent. Null when run from a plain terminal.
+ */
+function senderSession(refs: SessionRef[]): SessionRef | null {
+  const byPid = new Map(refs.map((r) => [r.pid, r]));
+  let pid: number | null = process.ppid;
+  for (let depth = 0; pid && depth < 15; depth++) {
+    const hit = byPid.get(pid);
+    if (hit) return hit;
+    pid = parentPid(pid);
+  }
+  return null;
+}
+
+function parseTtl(s: string): number | null {
+  const m = /^(\d+)([smhd])$/.exec(s);
+  if (!m) return null;
+  const mult = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
+  return parseInt(m[1], 10) * mult[m[2] as keyof typeof mult];
+}
+
+function listRefsTo(stream: NodeJS.WriteStream, refs: SessionRef[]): void {
+  for (const r of refs) {
+    stream.write(`  ${r.sessionId.slice(0, 8)}  pid ${r.pid}  ${r.cwd}\n`);
+  }
+}
+
+function runSend(argv: string[]): void {
+  let all = false;
+  let ttlMs = DEFAULT_TTL_MS;
+  const rest: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--all") all = true;
+    else if (a === "--ttl") {
+      const parsed = parseTtl(argv[++i] ?? "");
+      if (parsed === null) {
+        process.stderr.write("crew: --ttl wants e.g. 90s, 30m, 2h, 1d\n");
+        process.exit(2);
+      }
+      ttlMs = parsed;
+    } else rest.push(a);
+  }
+  const target = all ? null : rest.shift();
+  const text = rest.join(" ").trim();
+  if ((!all && !target) || !text) {
+    process.stderr.write(
+      'usage: crew send <shortId|pid|cwd-substring> "message" [--ttl 30m]\n' +
+        '       crew send --all "message"\n',
+    );
+    process.exit(2);
+  }
+  const refs = listSessionRefs();
+  const me = senderSession(refs);
+  const others = refs.filter((r) => r.sessionId !== me?.sessionId);
+  let targets: SessionRef[];
+  if (all) {
+    targets = others;
+    if (targets.length === 0) {
+      process.stderr.write("crew: no other live sessions\n");
+      process.exit(1);
+    }
+  } else {
+    const t = target as string;
+    const matches = others.filter(
+      (r) =>
+        r.sessionId.startsWith(t) ||
+        String(r.pid) === t ||
+        (t.length >= 3 && r.cwd.includes(t)),
+    );
+    if (matches.length === 0) {
+      process.stderr.write(`crew: no live session matches '${t}'. Sessions:\n`);
+      listRefsTo(process.stderr, others);
+      process.exit(1);
+    }
+    if (matches.length > 1) {
+      process.stderr.write(`crew: '${t}' is ambiguous:\n`);
+      listRefsTo(process.stderr, matches);
+      process.exit(1);
+    }
+    targets = matches;
+  }
+  const now = Date.now();
+  const msg: Message = {
+    ts: new Date(now).toISOString(),
+    from: me?.sessionId ?? "human",
+    fromShort: me ? me.sessionId.slice(0, 8) : "human",
+    fromCwd: me?.cwd ?? process.cwd(),
+    text,
+    expiresAt: new Date(now + ttlMs).toISOString(),
+  };
+  for (const r of targets) sendMessage(r.sessionId, msg);
+  const names = targets.map((r) => r.sessionId.slice(0, 8)).join(", ");
+  process.stdout.write(
+    `crew: queued for ${names} — delivers on their next tool call, turn end, or prompt.\n`,
+  );
+}
+
+function runInbox(): void {
+  const refs = listSessionRefs();
+  const me = senderSession(refs);
+  if (!me) {
+    process.stderr.write("crew: not inside a Claude Code session — no inbox\n");
+    process.exit(1);
+  }
+  const msgs = peekInbox(me.sessionId);
+  if (msgs.length === 0) {
+    process.stdout.write("crew: inbox empty\n");
+    return;
+  }
+  for (const m of msgs) {
+    process.stdout.write(`${m.ts}  ${m.fromShort} (${m.fromCwd}): ${m.text}\n`);
+  }
 }
 
 // ---------- rendering ----------
@@ -371,6 +551,9 @@ function renderText(sessions: Session[], opts: Opts): string {
       : "?";
     lines.push(`   cwd: ${s.cwd}`);
     lines.push(`   started: ${started}\n`);
+    if (s.pendingMessages > 0) {
+      lines.push(`   📨 ${s.pendingMessages} pending message(s) awaiting delivery\n`);
+    }
     lines.push(`   recap: ${s.recap ?? "(no recap recorded yet)"}`);
     lines.push(
       `\n   last ${s.tailCount} transcript entries (of ${s.messageCount}):`,
@@ -459,6 +642,37 @@ function renderHookContext(sessions: Session[]): string {
     lines.push("");
     lines.push(`…and ${sessions.length - shown.length} more.`);
   }
+  lines.push("");
+  lines.push(
+    `You can message any of them: \`crew send ${shown[0].shortId} "text"\` drops the text into that agent's context within seconds.`,
+  );
+  return lines.join("\n");
+}
+
+function ago(ts: string): string {
+  const ms = Date.now() - Date.parse(ts);
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  const min = Math.round(ms / 60_000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min}m ago`;
+  const h = Math.round(min / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
+
+function renderMessages(messages: Message[]): string {
+  const lines: string[] = [];
+  for (const m of messages) {
+    const when = ago(m.ts);
+    lines.push(
+      `📨 Message from ${m.fromShort} (${m.fromCwd}${when ? `, sent ${when}` : ""}):`,
+    );
+    for (const ln of m.text.split("\n")) lines.push(`  ${ln}`);
+  }
+  const replyTo = messages.map((m) => m.fromShort).find((s) => s !== "human");
+  if (replyTo) {
+    lines.push(`Reply with: \`crew send ${replyTo} "text"\``);
+  }
   return lines.join("\n");
 }
 
@@ -490,26 +704,56 @@ function rememberEmit(sid: string, context: string): void {
   }
 }
 
+const HOOK_EVENT_NAMES = new Set([
+  "SessionStart",
+  "UserPromptSubmit",
+  "PostToolUse",
+  "Stop",
+]);
+
+function emitHook(event: string, context: string): void {
+  process.stdout.write(
+    JSON.stringify({
+      hookSpecificOutput: { hookEventName: event, additionalContext: context },
+    }) + "\n",
+  );
+}
+
 function runHook(opts: Opts): void {
-  // Never exit non-zero: exit 2 on UserPromptSubmit would block the prompt.
+  // Never exit non-zero: exit 2 on UserPromptSubmit would block the prompt,
+  // and on Stop it would force the agent to continue.
   try {
     const input = readHookInput();
-    const event =
-      input.hook_event_name === "UserPromptSubmit" ? "UserPromptSubmit" : "SessionStart";
-    if (!opts.tailSet) opts.tailN = 5;
+    const event = HOOK_EVENT_NAMES.has(input.hook_event_name ?? "")
+      ? (input.hook_event_name as string)
+      : "SessionStart";
     const sid = typeof input.session_id === "string" ? input.session_id : "";
+    const messages = sid ? drainInbox(sid) : [];
+    // Mid-turn events fire on every tool call machine-wide, so they only
+    // deliver mail: one inbox readdir, no session/transcript scan, and total
+    // silence (zero tokens) when there's none.
+    if (event === "PostToolUse" || event === "Stop") {
+      if (messages.length > 0) emitHook(event, renderMessages(messages));
+      return;
+    }
+    if (!opts.tailSet) opts.tailN = 5;
+    pruneInboxes();
     const sessions = collectSessions(opts).filter(
       (s) => s.sessionId !== sid && s.pid !== process.ppid,
     );
-    if (sessions.length === 0) return; // nothing to inject, zero tokens spent
-    const context = renderHookContext(sessions);
-    if (event === "UserPromptSubmit" && unchangedSinceLastEmit(sid, context)) return;
-    rememberEmit(sid, context);
-    process.stdout.write(
-      JSON.stringify({
-        hookSpecificOutput: { hookEventName: event, additionalContext: context },
-      }) + "\n",
-    );
+    const status = sessions.length > 0 ? renderHookContext(sessions) : "";
+    if (!status && messages.length === 0) return; // nothing to inject, zero tokens spent
+    // The unchanged-status throttle only applies to the status block; queued
+    // messages always deliver.
+    if (
+      event === "UserPromptSubmit" &&
+      messages.length === 0 &&
+      unchangedSinceLastEmit(sid, status)
+    ) {
+      return;
+    }
+    if (status) rememberEmit(sid, status);
+    emitHook(event, [renderMessages(messages), status].filter(Boolean).join("\n\n"));
   } catch {
     // swallow everything; a broken hook must not break the session
   }
@@ -544,7 +788,17 @@ function runSettingsCommand(mode: "install-hook" | "uninstall-hook"): void {
 // ---------- main ----------
 
 function main(): void {
-  const opts = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  // `send` takes free-form message text; route it before flag parsing.
+  if (argv[0] === "send") {
+    runSend(argv.slice(1));
+    return;
+  }
+  if (argv[0] === "inbox") {
+    runInbox();
+    return;
+  }
+  const opts = parseArgs(argv);
   if (opts.mode === "install-hook" || opts.mode === "uninstall-hook") {
     runSettingsCommand(opts.mode);
     return;
