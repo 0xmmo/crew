@@ -19,7 +19,7 @@
 
 <br>
 
-crew auto-injects what your other running [Claude Code](https://claude.com/claude-code) sessions are doing — status, recap, and a tail of each transcript — into every session's context. Agents see each other's in-flight work and steer around it, so parallel sessions work from one shared checkout instead of needing a worktree each. Agents can also message each other directly with `crew send`. There's a CLI for watching all of it yourself.
+crew auto-injects what your other running [Claude Code](https://claude.com/claude-code) sessions are doing (status, recap, and a tail of each transcript) into every session's context. Agents see each other's in-flight work and steer around it, so parallel sessions work from one shared checkout instead of needing a worktree each. Agents can also message each other directly with `crew send`. There's a CLI for watching all of it yourself.
 
 *Just like autonomous cars don't need stoplights, agents don't need worktrees.*
 
@@ -34,7 +34,7 @@ crew auto-injects what your other running [Claude Code](https://claude.com/claud
 npm install -g @0xmmo/crew
 ```
 
-That's the whole setup: installing globally wires the hook into `~/.claude/settings.json` automatically. (If your npm has `ignore-scripts=true`, postinstall can't run — do it with `crew install-hook` once instead.) Requires Node.js ≥ 18. macOS and Linux.
+That's the whole setup: installing globally wires the hook into `~/.claude/settings.json` automatically. (If your npm has `ignore-scripts=true`, postinstall can't run; do it with `crew install-hook` once instead.) Requires Node.js ≥ 18. macOS and Linux.
 
 ### Or as a Claude Code plugin
 
@@ -43,7 +43,7 @@ That's the whole setup: installing globally wires the hook into `~/.claude/setti
 /plugin install crew@0xmmo
 ```
 
-Same thing, zero `settings.json` edits: the plugin ships the four hooks and its own copy of the binary (fetched from npm), and `/plugin` manages updates. When the global `crew` command isn't installed, the context crew injects automatically points agents at the plugin's own entry point instead, so messaging still works. Pick either path — if you end up with both, the plugin defers to the global install so nothing is injected twice. The global install is still the way to get `crew` on your own PATH.
+Same thing, zero `settings.json` edits: the plugin ships the four hooks and its own copy of the binary (fetched from npm), and `/plugin` manages updates. When the global `crew` command isn't installed, the context crew injects automatically points agents at the plugin's own entry point instead, so messaging still works. Pick either path; if you end up with both, the plugin defers to the global install so nothing is injected twice. The global install is still the way to get `crew` on your own PATH.
 
 ## What your agents see, live
 
@@ -66,7 +66,7 @@ You can message any of them: `crew send 4d3de8db "text"` drops the text into
 that agent's context within seconds.
 ```
 
-So when an agent in one session is about to touch files another session is mid-way through, it knows — and it knows how to say something about it. A `crew send` from another agent (or from you in a plain terminal) lands the same way, even mid-turn:
+So when an agent in one session is about to touch files another session is mid-way through, it knows, and it knows how to say something about it. A `crew send` from another agent (or from you in a plain terminal) lands the same way, even mid-turn:
 
 ```yaml
 📨 Message from 4d3de8db (/Users/you/Projects/api, sent 2m ago):
@@ -76,7 +76,7 @@ Reply with: `crew send 4d3de8db "text"`
 
 ## Messaging between agents
 
-Any session — or you, from a plain terminal — can drop a message straight into another agent's context:
+Any session (or you, from a plain terminal) can drop a message straight into another agent's context:
 
 ```sh
 crew send b5e3 "settings.ts is mine for the next 20 min"   # target: shortId prefix, pid, or cwd substring
@@ -91,7 +91,7 @@ When it arrives depends on what the target is doing:
 
 | Target state | Delivered |
 |---|---|
-| busy, mid-turn | after its next tool call — typically seconds |
+| busy, mid-turn | after its next tool call, typically seconds |
 | finishing a turn | at turn end, and the agent acts on it before going idle |
 | idle | on its next user prompt |
 
@@ -154,7 +154,7 @@ The hook is careful about tokens and safety:
 - Emits **nothing** when no other sessions are running, and nothing on `UserPromptSubmit` when the crew status hasn't changed since the last emit (a per-session hash under your temp dir).
 - The `PostToolUse`/`Stop` modes fire on every tool call, so they do the bare minimum: one inbox readdir, no session or transcript scanning, total silence when there's no mail.
 - Tails are short in hook mode (5 entries per session, truncated) and capped at 8 sessions.
-- It always exits 0 — a broken or slow read can never block your prompt, your session, or an agent's turn.
+- It always exits 0, so a broken or slow read can never block your prompt, your session, or an agent's turn.
 - The auto-install merges into your existing `settings.json` and refuses to write over a file it can't parse.
 
 Managing it:
@@ -165,7 +165,7 @@ crew install-hook                # add it back (idempotent)
 CREW_NO_HOOK=1 npm i -g @0xmmo/crew   # install without touching settings.json
 ```
 
-Or wire it manually — this is all the auto-install adds:
+Or wire it manually; this is all the auto-install adds:
 
 ```json
 {
@@ -188,7 +188,7 @@ Or wire it manually — this is all the auto-install adds:
 
 ## How discovery works
 
-Every interactive Claude Code session writes `~/.claude/sessions/<pid>.json` while running. crew reads those, keeps the ones whose pid is still a live `claude` process (skipping stale files and reused pids), then pulls each session's recap and transcript tail from `~/.claude/projects/`. It reads only — it never touches your sessions. In hook mode it additionally excludes the session it's reporting to, so an agent never sees itself listed.
+Every interactive Claude Code session writes `~/.claude/sessions/<pid>.json` while running. crew reads those, keeps the ones whose pid is still a live `claude` process (skipping stale files and reused pids), then pulls each session's recap and transcript tail from `~/.claude/projects/`. It reads only and never touches your sessions. In hook mode it additionally excludes the session it's reporting to, so an agent never sees itself listed.
 
 Set `CLAUDE_HOME` to point at a non-default `~/.claude`. The hook installer also honors `CLAUDE_CONFIG_DIR` for locating `settings.json`.
 
