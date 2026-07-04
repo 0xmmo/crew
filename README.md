@@ -2,8 +2,9 @@
 
 # crew
 
-**Claude Code agents that see each other.**<br>
-**One checkout. No branches. No worktrees.**
+**Let Claude Code agents talk to each other.**
+
+<sub>Ship features in parallel, no branches, no worktrees. Hand off work between sessions,<br>steer around each other's in-flight edits, announce deploys to every running agent.</sub>
 
 [![npm version](https://img.shields.io/npm/v/@0xmmo/crew?style=flat-square&color=e8a33d&labelColor=1a1a23)](https://www.npmjs.com/package/@0xmmo/crew)
 [![downloads](https://img.shields.io/npm/dm/@0xmmo/crew?style=flat-square&color=e8a33d&labelColor=1a1a23)](https://www.npmjs.com/package/@0xmmo/crew)
