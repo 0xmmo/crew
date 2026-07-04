@@ -1,10 +1,33 @@
+<div align="center">
+
 # crew
 
-Let [Claude Code](https://claude.com/claude-code) agents coordinate with shared context and agent-to-agent messaging. Ship at breakneck with no branches and no worktrees.
+**Claude Code agents that see each other.**<br>
+**One checkout. No branches. No worktrees.**
 
-crew auto-injects what your other running Claude Code sessions are doing — status, recap, and a tail of each transcript — into every session's context. Agents see each other's in-flight work and steer around it, so parallel sessions work from one shared checkout instead of needing a worktree each. Agents can also message each other directly with `crew send`. There's a CLI for watching all of it yourself.
+[![npm version](https://img.shields.io/npm/v/@0xmmo/crew?style=flat-square&color=e8a33d&labelColor=1a1a23)](https://www.npmjs.com/package/@0xmmo/crew)
+[![downloads](https://img.shields.io/npm/dm/@0xmmo/crew?style=flat-square&color=e8a33d&labelColor=1a1a23)](https://www.npmjs.com/package/@0xmmo/crew)
+[![node](https://img.shields.io/node/v/@0xmmo/crew?style=flat-square&color=e8a33d&labelColor=1a1a23)](https://www.npmjs.com/package/@0xmmo/crew)
+[![license](https://img.shields.io/npm/l/@0xmmo/crew?style=flat-square&color=e8a33d&labelColor=1a1a23)](https://github.com/0xmmo/crew/blob/main/LICENSE)
+
+<br>
+
+<img src="https://raw.githubusercontent.com/0xmmo/crew/main/assets/demo.gif" alt="Two Claude Code agents in the same checkout: crew injects each session's live status into the other, one steers around the other's in-flight refactor, and a crew send message lands mid-turn." width="830">
+
+</div>
+
+<br>
+
+crew auto-injects what your other running [Claude Code](https://claude.com/claude-code) sessions are doing — status, recap, and a tail of each transcript — into every session's context. Agents see each other's in-flight work and steer around it, so parallel sessions work from one shared checkout instead of needing a worktree each. Agents can also message each other directly with `crew send`. There's a CLI for watching all of it yourself.
 
 *Just like autonomous cars don't need stoplights, agents don't need worktrees.*
+
+- **Shared context, live** — every session knows what the rest of the crew is doing, refreshed as it changes.
+- **Agent-to-agent mail** — `crew send` drops a message into another agent's context within seconds, even mid-turn.
+- **A human view** — one command shows every session's status, recap, and transcript tail; `--json` for scripts and agents.
+- **Zero config** — `npm i -g` wires the hooks. Token-frugal and fail-safe by design; reads sessions, never touches them.
+
+## Install
 
 ```sh
 npm install -g @0xmmo/crew
@@ -64,6 +87,49 @@ When it arrives depends on what the target is doing:
 
 An idle session can't be woken externally, so undelivered mail waits in `~/.claude/crew/inbox/` until its TTL expires; the `crew` view shows a 📨 pending count for it in the meantime. Once delivered, a message becomes a permanent part of the target's transcript, like anything else it read. Each message is delivered exactly once, even when hook events race.
 
+## The CLI
+
+The same view, for humans:
+
+```sh
+crew                  # human view, last 50 transcript entries per session
+crew 10               # last 10 entries
+crew --json           # NDJSON: one structured object per session
+crew --json --full    # NDJSON without tool input/output truncation
+crew --dir ~/work     # only sessions whose cwd is under ~/work
+crew --dir            # only sessions under the current directory
+crew send <t> "msg"   # message a session (t: shortId prefix, pid, cwd substring)
+crew inbox            # your own pending messages
+crew --help
+```
+
+```yaml
+🔵  4d3de8db   pid 66643   status: busy
+   cwd: /Users/you/Projects/api
+   started: 6/28/2026, 4:40:36 PM
+
+   recap: Goal was fixing the imagent CPU spin, now resolved and documented.
+
+   last 3 transcript entries (of 215):
+   17:41 › run the test suite
+   17:41 ⚙ Bash: npm test
+   17:42 ‹ All 142 tests pass.
+```
+
+- **status** — `busy` (working), `idle` (awaiting input), `shell` (running a shell command).
+- **recap** — the session's most recent built-in recap (`away_summary`).
+- **tail** — the last N transcript entries: `›` you, `‹` Claude, `⚙` tool call, `⟲` tool result.
+
+### `--json` for agents
+
+`--json` prints newline-delimited JSON (NDJSON), one object per session, with explicit fields instead of glyphs — built for another agent or script to consume:
+
+```json
+{"pid":66643,"sessionId":"4d3de8db-…","shortId":"4d3de8db","status":"busy","cwd":"/Users/you/Projects/api","startedAt":"2026-06-28T23:40:36.000Z","transcript":"/Users/you/.claude/projects/…/4d3de8db-….jsonl","recap":"…","messageCount":215,"tailCount":3,"tail":[{"ts":"…","role":"assistant","kind":"text","text":"All 142 tests pass."}]}
+```
+
+Tool input/output is truncated by default; pass `--full` for the complete content.
+
 ## How the injection works
 
 `npm i -g` adds `crew --hook` to four Claude Code hook events:
@@ -110,49 +176,6 @@ Or wire it manually — this is all the auto-install adds:
 }
 ```
 
-## The CLI
-
-The same view, for humans:
-
-```sh
-crew                  # human view, last 50 transcript entries per session
-crew 10               # last 10 entries
-crew --json           # NDJSON: one structured object per session
-crew --json --full    # NDJSON without tool input/output truncation
-crew --dir ~/work     # only sessions whose cwd is under ~/work
-crew --dir            # only sessions under the current directory
-crew send <t> "msg"   # message a session (t: shortId prefix, pid, cwd substring)
-crew inbox            # your own pending messages
-crew --help
-```
-
-```yaml
-🔵  4d3de8db   pid 66643   status: busy
-   cwd: /Users/you/Projects/api
-   started: 6/28/2026, 4:40:36 PM
-
-   recap: Goal was fixing the imagent CPU spin, now resolved and documented.
-
-   last 3 transcript entries (of 215):
-   17:41 › run the test suite
-   17:41 ⚙ Bash: npm test
-   17:42 ‹ All 142 tests pass.
-```
-
-- **status** — `busy` (working), `idle` (awaiting input), `shell` (running a shell command).
-- **recap** — the session's most recent built-in recap (`away_summary`).
-- **tail** — the last N transcript entries: `›` you, `‹` Claude, `⚙` tool call, `⟲` tool result.
-
-### `--json` for agents
-
-`--json` prints newline-delimited JSON (NDJSON), one object per session, with explicit fields instead of glyphs — built for another agent or script to consume:
-
-```json
-{"pid":66643,"sessionId":"4d3de8db-…","shortId":"4d3de8db","status":"busy","cwd":"/Users/you/Projects/api","startedAt":"2026-06-28T23:40:36.000Z","transcript":"/Users/you/.claude/projects/…/4d3de8db-….jsonl","recap":"…","messageCount":215,"tailCount":3,"tail":[{"ts":"…","role":"assistant","kind":"text","text":"All 142 tests pass."}]}
-```
-
-Tool input/output is truncated by default; pass `--full` for the complete content.
-
 ## How discovery works
 
 Every interactive Claude Code session writes `~/.claude/sessions/<pid>.json` while running. crew reads those, keeps the ones whose pid is still a live `claude` process (skipping stale files and reused pids), then pulls each session's recap and transcript tail from `~/.claude/projects/`. It reads only — it never touches your sessions. In hook mode it additionally excludes the session it's reporting to, so an agent never sees itself listed.
@@ -167,6 +190,11 @@ npm install
 npm run build
 echo '{"session_id":"x","hook_event_name":"SessionStart"}' | node dist/crew.js --hook
 node dist/crew.js --json
+
+# regenerate the demo GIF (assets/demo.html is the storyboard)
+node assets/record.mjs /tmp/crew-frames 12
+ffmpeg -framerate 12 -i /tmp/crew-frames/f%05d.png -vf "scale=960:-1:flags=lanczos,palettegen=max_colors=128:stats_mode=diff" /tmp/crew-palette.png
+ffmpeg -framerate 12 -i /tmp/crew-frames/f%05d.png -i /tmp/crew-palette.png -lavfi "scale=960:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" -loop 0 assets/demo.gif
 ```
 
 ## License

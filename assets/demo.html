@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>crew — demo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --desk-0: #0d0d12;
+    --desk-1: #060608;
+    --pane-bg: #14141b;
+    --pane-border: #26262f;
+    --titlebar: #1a1a23;
+    --fg: #cfccc4;
+    --dim: #6f6e7a;
+    --dimmer: #4a4954;
+    --amber: #e8a33d;
+    --amber-soft: rgba(232, 163, 61, 0.07);
+    --cyan: #62b8c4;
+    --green: #83b97e;
+    --tl-red: #d95c52;
+    --tl-yellow: #dba63f;
+    --tl-green: #5cb265;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: #000; }
+  #stage {
+    position: relative;
+    width: 960px; height: 600px;
+    overflow: hidden;
+    background: radial-gradient(120% 90% at 50% 8%, var(--desk-0) 0%, var(--desk-1) 100%);
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+  }
+
+  .pane {
+    position: absolute;
+    width: 460px; height: 526px;
+    background: var(--pane-bg);
+    border: 1px solid var(--pane-border);
+    border-radius: 10px;
+    box-shadow: 0 18px 50px rgba(0,0,0,.55), 0 2px 8px rgba(0,0,0,.4);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  #paneL { left: 22px; top: 26px; z-index: 1; }
+  #paneR { left: 478px; top: 48px; z-index: 2; }
+
+  .titlebar {
+    flex: 0 0 34px;
+    background: var(--titlebar);
+    border-bottom: 1px solid var(--pane-border);
+    display: flex; align-items: center;
+    padding: 0 12px; gap: 7px;
+    position: relative;
+  }
+  .tl { width: 11px; height: 11px; border-radius: 50%; }
+  .titlebar .title {
+    position: absolute; left: 0; right: 0; text-align: center;
+    font-size: 11.5px; color: var(--dim); letter-spacing: .02em;
+    pointer-events: none;
+  }
+  .chip {
+    margin-left: auto; z-index: 1;
+    font-size: 10px; font-weight: 600; letter-spacing: .04em;
+    color: var(--dim);
+    border: 1px solid var(--pane-border);
+    background: rgba(255,255,255,.02);
+    border-radius: 4px; padding: 2px 6px;
+  }
+
+  .scroll {
+    flex: 1 1 auto;
+    overflow: hidden;
+    padding: 13px 15px 10px;
+    font-size: 12px; line-height: 1.6;
+    color: var(--fg);
+  }
+  .entry { white-space: pre-wrap; word-break: break-word; margin-bottom: 7px; display: none; }
+  .entry.on { display: block; }
+
+  .entry.user   { color: var(--cyan); }
+  .entry.claude { color: var(--fg); }
+  .entry.tool   { color: var(--fg); }
+  .entry.tool b { color: var(--fg); font-weight: 600; }
+  .entry.tool .toolname { color: var(--dim); }
+  .entry.result { color: var(--dimmer); }
+  .entry.result.ok { color: var(--green); opacity: .85; }
+  .hl-crew { color: var(--amber); font-weight: 600; }
+
+  .cur {
+    display: inline-block; width: 7px; height: 14px;
+    vertical-align: -2px; margin-left: 1px;
+    background: var(--fg);
+  }
+  .entry.user .cur { background: var(--cyan); }
+  .cur.off { visibility: hidden; }
+
+  .block {
+    display: none;
+    margin: 2px 0 9px;
+    border-left: 2px solid var(--amber);
+    background: var(--amber-soft);
+    border-radius: 0 6px 6px 0;
+    padding: 8px 10px 7px;
+    font-size: 11.5px; line-height: 1.58;
+  }
+  .block.on { display: block; }
+  .block .bhead {
+    color: var(--amber); font-size: 10px; font-weight: 700;
+    letter-spacing: .12em; text-transform: uppercase;
+    margin-bottom: 5px;
+  }
+  .block .bline { white-space: pre-wrap; word-break: break-word; color: var(--fg); visibility: hidden; }
+  .block .bline.on { visibility: visible; }
+  .block .bline .d { color: var(--dim); }
+  .block .bline .a { color: var(--amber); }
+  .block .bline .busy { color: var(--tl-red); }
+
+  .mail { box-shadow: 0 0 0 0 rgba(232,163,61,0); }
+
+  .statusbar {
+    flex: 0 0 26px;
+    border-top: 1px solid var(--pane-border);
+    display: flex; align-items: center;
+    padding: 0 14px;
+    font-size: 11px; color: var(--dim);
+    background: rgba(0,0,0,.18);
+  }
+  .statusbar .spin { color: var(--amber); margin-right: 7px; }
+
+  #endcard {
+    position: absolute; inset: 0; z-index: 10;
+    background: rgba(5,5,8,.82);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    opacity: 0;
+  }
+  #wordmark {
+    font-size: 84px; font-weight: 700; letter-spacing: -0.02em;
+    color: var(--fg);
+    line-height: 1;
+  }
+  #wordmark .wcur {
+    display: inline-block; width: 38px; height: 66px;
+    background: var(--amber);
+    vertical-align: -4px; margin-left: 10px;
+  }
+  #wordmark .wcur.off { visibility: hidden; }
+  #tagline {
+    margin-top: 22px;
+    font-size: 15px; color: var(--dim); letter-spacing: .01em;
+    text-align: center; line-height: 1.7;
+  }
+  #tagline b { color: var(--fg); font-weight: 500; }
+  #installpill {
+    margin-top: 30px;
+    border: 1px solid rgba(232,163,61,.55);
+    background: rgba(232,163,61,.06);
+    border-radius: 8px;
+    padding: 11px 22px;
+    font-size: 15.5px; color: var(--amber); font-weight: 500;
+    min-height: 46px; min-width: 60px;
+  }
+  #installpill .d { color: var(--dim); }
+  #endfoot {
+    margin-top: 26px;
+    font-size: 12px; color: var(--dimmer); letter-spacing: .03em;
+  }
+
+  #fader {
+    position: absolute; inset: 0; z-index: 20;
+    background: #000; opacity: 0; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+
+  <div class="pane" id="paneL">
+    <div class="titlebar">
+      <div class="tl" style="background:var(--tl-red)"></div>
+      <div class="tl" style="background:var(--tl-yellow)"></div>
+      <div class="tl" style="background:var(--tl-green)"></div>
+      <div class="title">claude — ~/Projects/api</div>
+      <div class="chip">a1b2c3d4</div>
+    </div>
+    <div class="scroll" id="scrollL"></div>
+    <div class="statusbar" id="statusL"></div>
+  </div>
+
+  <div class="pane" id="paneR">
+    <div class="titlebar">
+      <div class="tl" style="background:var(--tl-red)"></div>
+      <div class="tl" style="background:var(--tl-yellow)"></div>
+      <div class="tl" style="background:var(--tl-green)"></div>
+      <div class="title">claude — ~/Projects/api</div>
+      <div class="chip">e5f6a7b8</div>
+    </div>
+    <div class="scroll" id="scrollR"></div>
+    <div class="statusbar" id="statusR"></div>
+  </div>
+
+  <div id="endcard">
+    <div id="wordmark">crew<span class="wcur"></span></div>
+    <div id="tagline">Claude Code agents that see each other.<br><b>One checkout. No worktrees.</b></div>
+    <div id="installpill"><span class="d">$ </span><span id="installcmd"></span></div>
+    <div id="endfoot">github.com/0xmmo/crew</div>
+  </div>
+
+  <div id="fader"></div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Deterministic timeline. window.seek(t) renders the exact state at t (ms).
+// ---------------------------------------------------------------------------
+
+const DURATION = 20000;
+window.DURATION = DURATION;
+
+// entry kinds: user | claude | tool | result | crewctx | mail
+// typed entries reveal text at `cps` chars/sec starting at `at`.
+const TIMELINE = [
+  // ---- LEFT pane: pre-existing work, visible from t=0 --------------------
+  { pane: 'L', at: 0, kind: 'user',
+    text: '› migrate settings storage to async — it blocks the event loop' },
+  { pane: 'L', at: 0, kind: 'claude',
+    text: '‹ On it. src/settings.ts is the hot path — refactoring it now.' },
+  { pane: 'L', at: 0, kind: 'tool', name: 'Read', input: 'src/settings.ts' },
+  { pane: 'L', at: 0, kind: 'result', text: '⟲ 412 lines' },
+  { pane: 'L', at: 0, kind: 'tool', name: 'Grep', input: 'readSettingsSync' },
+  { pane: 'L', at: 0, kind: 'result', text: '⟲ 9 matches in 4 files' },
+  { pane: 'L', at: 0, kind: 'tool', name: 'Edit', input: 'src/settings.ts' },
+
+  // ---- RIGHT pane: a second agent starts in the SAME checkout ------------
+  { pane: 'R', at: 400, kind: 'user', cps: 28,
+    text: '› add rate limiting to the api client' },
+
+  // crew injects the other session's live state
+  { pane: 'R', at: 2100, kind: 'crewctx', lineMs: 300, head: 'crew · injected context', lines: [
+      '1 other Claude Code session running on this machine.',
+      '<span class="a">•</span> a1b2c3d4 — <span class="busy">busy</span> — ~/Projects/api',
+      '  <span class="d">recap:</span> Migrating settings storage to async;',
+      '  <span class="d">mid-way through src/settings.ts.</span>',
+      '  <span class="d">14:02</span> ⚙ Edit: src/settings.ts',
+      '<span class="d">Message it:</span> <span class="a">crew send a1b2c3d4 "text"</span>',
+  ] },
+
+  // the agent steers around the in-flight work on its own
+  { pane: 'R', at: 4600, kind: 'claude', cps: 55,
+    text: '‹ a1b2c3d4 is mid-refactor in src/settings.ts — I’ll keep the limiter self-contained in src/http/limiter.ts and stay out of its way.' },
+  { pane: 'R', at: 7600, kind: 'tool', name: 'Write', input: 'src/http/limiter.ts' },
+  { pane: 'R', at: 8300, kind: 'result', text: '⟲ 84 lines' },
+  { pane: 'R', at: 8900, kind: 'tool', name: 'Bash', input: 'npm test -- limiter' },
+  { pane: 'R', at: 10100, kind: 'result', ok: true, text: '⟲ ✓ 12 passing' },
+
+  // ---- LEFT pane: finishes, tells the crew ------------------------------
+  { pane: 'L', at: 5400, kind: 'result', text: '⟲ src/settings.ts (+48 −31)' },
+  { pane: 'L', at: 6100, kind: 'tool', name: 'Bash', input: 'npm test' },
+  { pane: 'L', at: 7900, kind: 'result', ok: true, text: '⟲ ✓ 142 passing' },
+  { pane: 'L', at: 8500, kind: 'claude', cps: 55,
+    text: '‹ Refactor landed. Letting the other session know settings is safe to touch again.' },
+  { pane: 'L', at: 10600, kind: 'tool', name: 'Bash', crew: true,
+    input: 'crew send e5f6a7b8 "settings.ts landed — config APIs stable"' },
+  { pane: 'L', at: 11500, kind: 'result', ok: true, text: '⟲ ✓ queued for e5f6a7b8' },
+
+  // ---- RIGHT pane: the message lands mid-turn ----------------------------
+  { pane: 'R', at: 12200, kind: 'mail', lineMs: 260, head: '📨 message from a1b2c3d4', lines: [
+      '<span class="d">~/Projects/api · sent just now</span>',
+      'settings.ts landed — config APIs stable',
+      '<span class="d">Reply:</span> <span class="a">crew send a1b2c3d4 "text"</span>',
+  ] },
+  { pane: 'R', at: 13400, kind: 'claude', cps: 55,
+    text: '‹ Perfect timing — wiring the rate-limit config into settings now.' },
+  { pane: 'R', at: 15000, kind: 'tool', name: 'Edit', input: 'src/settings.ts' },
+  { pane: 'R', at: 15600, kind: 'result', text: '⟲ src/settings.ts (+9 −2)' },
+];
+
+// status bars: {pane, from, to, spin, text}
+const STATUS = [
+  { pane: 'L', from: 0,     to: 8500,  spin: true,  text: 'Refactoring… (esc to interrupt)' },
+  { pane: 'L', from: 8500,  to: 11500, spin: true,  text: 'Messaging crew…' },
+  { pane: 'L', from: 11500, to: 1e9,   spin: false, text: '❯' },
+  { pane: 'R', from: 0,     to: 2100,  spin: false, text: '❯' },
+  { pane: 'R', from: 2100,  to: 12200, spin: true,  text: 'Building limiter… (esc to interrupt)' },
+  { pane: 'R', from: 12200, to: 16200, spin: true,  text: 'Reading mail…' },
+  { pane: 'R', from: 16200, to: 1e9,   spin: false, text: '❯' },
+];
+
+const END_AT = 16600;          // endcard fade start
+const END_FADE = 700;
+const INSTALL_AT = 17500;      // install command typing start
+const INSTALL_CMD = 'npm i -g @0xmmo/crew';
+const INSTALL_CPS = 26;
+
+const SPINNER = ['✳', '✢', '✻', '✽'];
+
+// --- build DOM once --------------------------------------------------------
+const scrolls = { L: document.getElementById('scrollL'), R: document.getElementById('scrollR') };
+const statuses = { L: document.getElementById('statusL'), R: document.getElementById('statusR') };
+
+for (const e of TIMELINE) {
+  if (e.kind === 'crewctx' || e.kind === 'mail') {
+    const div = document.createElement('div');
+    div.className = 'block' + (e.kind === 'mail' ? ' mail' : '');
+    div.innerHTML = '<div class="bhead">' + e.head + '</div>' +
+      e.lines.map(l => '<div class="bline">' + l + '</div>').join('');
+    e.el = div;
+    e.lineEls = [...div.querySelectorAll('.bline')];
+  } else {
+    const div = document.createElement('div');
+    div.className = 'entry ' + e.kind + (e.ok ? ' ok' : '');
+    if (e.kind === 'tool') {
+      const input = e.crew
+        ? e.input.replace(/^crew send/, '<span class="hl-crew">crew send</span>')
+        : e.input;
+      div.innerHTML = '⚙ <b>' + e.name + ':</b> <span class="toolname">' + input + '</span>';
+    } else if (e.kind === 'result') {
+      div.textContent = e.text;
+    } else {
+      div.innerHTML = '<span class="txt"></span><span class="cur"></span>';
+      e.txtEl = div.querySelector('.txt');
+      e.curEl = div.querySelector('.cur');
+    }
+    e.el = div;
+  }
+  scrolls[e.pane].appendChild(e.el);
+}
+
+const endcard = document.getElementById('endcard');
+const wcur = document.querySelector('#wordmark .wcur');
+const installcmd = document.getElementById('installcmd');
+const fader = document.getElementById('fader');
+const panes = [document.getElementById('paneL'), document.getElementById('paneR')];
+
+function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
+
+window.seek = function seek(t) {
+  const blink = Math.floor(t / 500) % 2 === 0;
+
+  for (const e of TIMELINE) {
+    if (e.kind === 'crewctx' || e.kind === 'mail') {
+      const on = t >= e.at;
+      e.el.classList.toggle('on', on);
+      if (on) {
+        const shown = Math.floor((t - e.at) / e.lineMs) + 1;
+        e.lineEls.forEach((el, i) => el.classList.toggle('on', i < shown));
+        if (e.kind === 'mail') {
+          // amber glow pulse for ~1.6s after arrival
+          const k = clamp(1 - (t - e.at) / 1600, 0, 1);
+          e.el.style.boxShadow = k > 0
+            ? `0 0 ${18 * k}px ${2 * k}px rgba(232,163,61,${0.32 * k})`
+            : 'none';
+        }
+      }
+      continue;
+    }
+    const on = t >= e.at;
+    e.el.classList.toggle('on', on);
+    if (on && e.txtEl) {
+      const cps = e.cps || 0;
+      let n = e.text.length;
+      let typing = false;
+      if (cps > 0) {
+        n = Math.floor((t - e.at) / 1000 * cps);
+        typing = n < e.text.length;
+        n = clamp(n, 0, e.text.length);
+      }
+      e.txtEl.textContent = e.text.slice(0, n);
+      // solid cursor while typing; blinking briefly after a user prompt ends
+      const showCur = typing || (e.kind === 'user' && cps > 0 && !typing && t < e.at + e.text.length / cps * 1000 + 900 && blink);
+      e.curEl.classList.toggle('off', !showCur);
+    }
+  }
+
+  // status bars
+  for (const p of ['L', 'R']) {
+    const s = STATUS.find(s => s.pane === p && t >= s.from && t < s.to);
+    if (s) {
+      statuses[p].innerHTML = s.spin
+        ? '<span class="spin">' + SPINNER[Math.floor(t / 220) % SPINNER.length] + '</span>' + s.text
+        : '<span style="color:var(--dimmer)">' + s.text + '</span>';
+    } else {
+      statuses[p].textContent = '';
+    }
+  }
+
+  // pin scroll to bottom
+  for (const p of ['L', 'R']) scrolls[p].scrollTop = scrolls[p].scrollHeight;
+
+  // endcard
+  const ek = clamp((t - END_AT) / END_FADE, 0, 1);
+  endcard.style.opacity = ek;
+  panes.forEach(p => p.style.filter = ek > 0 ? `brightness(${1 - 0.55 * ek})` : 'none');
+  wcur.classList.toggle('off', ek >= 1 && !blink);
+  const in_n = clamp(Math.floor((t - INSTALL_AT) / 1000 * INSTALL_CPS), 0, INSTALL_CMD.length);
+  installcmd.textContent = t >= INSTALL_AT ? INSTALL_CMD.slice(0, in_n) : '';
+
+  // loop fades: from black at start, to black at end
+  let f = 0;
+  if (t < 400) f = 1 - t / 400;
+  if (t > DURATION - 500) f = (t - (DURATION - 500)) / 500;
+  fader.style.opacity = clamp(f, 0, 1);
+};
+
+window.seek(0);
+</script>
+</body>
+</html>
