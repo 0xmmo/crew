@@ -24,7 +24,14 @@
  *   crew --help
  */
 
-import { readFileSync, readdirSync, existsSync, writeFileSync } from "node:fs";
+import {
+  readFileSync,
+  readdirSync,
+  existsSync,
+  writeFileSync,
+  accessSync,
+  constants as fsConstants,
+} from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -50,6 +57,36 @@ import {
 const CLAUDE_HOME = process.env.CLAUDE_HOME || join(homedir(), ".claude");
 const SESS_DIR = join(CLAUDE_HOME, "sessions");
 const PROJ_DIR = join(CLAUDE_HOME, "projects");
+
+// ---------- plugin awareness ----------
+
+function onPath(bin: string): boolean {
+  for (const dir of (process.env.PATH || "").split(":")) {
+    if (!dir) continue;
+    try {
+      accessSync(join(dir, bin), fsConstants.X_OK);
+      return true;
+    } catch {
+      // keep looking
+    }
+  }
+  return false;
+}
+
+// When crew runs as a Claude Code plugin hook (CLAUDE_PLUGIN_ROOT is set) and
+// there is no global `crew` on PATH, emitted guidance must name a command
+// agents can actually run: the plugin's own entry point.
+let cachedCliCmd: string | null = null;
+function cliCmd(): string {
+  if (cachedCliCmd === null) {
+    const root = process.env.CLAUDE_PLUGIN_ROOT;
+    cachedCliCmd =
+      root && !onPath("crew")
+        ? `node "${join(root, "dist", "crew.js")}"`
+        : "crew";
+  }
+  return cachedCliCmd;
+}
 
 // ---------- types ----------
 
@@ -621,7 +658,7 @@ function renderHookContext(sessions: Session[]): string {
   const shown = sessions.slice(0, MAX_SESSIONS);
   const lines: string[] = [
     `${sessions.length} other Claude Code session(s) running on this machine right now. ` +
-      "Consider them before starting overlapping work; run `crew` for the full view.",
+      `Consider them before starting overlapping work; run \`${cliCmd()}\` for the full view.`,
   ];
   for (const s of shown) {
     lines.push("");
@@ -645,7 +682,7 @@ function renderHookContext(sessions: Session[]): string {
   }
   lines.push("");
   lines.push(
-    `You can message any of them: \`crew send ${shown[0].shortId} "text"\` drops the text into that agent's context within seconds.`,
+    `You can message any of them: \`${cliCmd()} send ${shown[0].shortId} "text"\` drops the text into that agent's context within seconds.`,
   );
   return lines.join("\n");
 }
@@ -672,7 +709,7 @@ function renderMessages(messages: Message[]): string {
   }
   const replyTo = messages.map((m) => m.fromShort).find((s) => s !== "human");
   if (replyTo) {
-    lines.push(`Reply with: \`crew send ${replyTo} "text"\``);
+    lines.push(`Reply with: \`${cliCmd()} send ${replyTo} "text"\``);
   }
   return lines.join("\n");
 }
@@ -724,6 +761,13 @@ function runHook(opts: Opts): void {
   // Never exit non-zero: exit 2 on UserPromptSubmit would block the prompt,
   // and on Stop it would force the agent to continue.
   try {
+    // Installed both ways (plugin + settings.json hook)? Defer to the
+    // settings-level hook so context is never injected twice. Only defers
+    // when the global `crew` actually resolves, so a stale settings entry
+    // can't silence both copies.
+    if (process.env.CLAUDE_PLUGIN_ROOT && onPath("crew") && hookInstalled()) {
+      return;
+    }
     const input = readHookInput();
     const event = HOOK_EVENT_NAMES.has(input.hook_event_name ?? "")
       ? (input.hook_event_name as string)

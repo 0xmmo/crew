@@ -1,0 +1,11 @@
+{
+  "name": "crew",
+  "displayName": "crew",
+  "description": "Claude Code agents that see each other: live shared context across sessions and agent-to-agent messaging. One checkout, no worktrees.",
+  "author": { "name": "0xmmo", "url": "https://github.com/0xmmo" },
+  "homepage": "https://github.com/0xmmo/crew",
+  "repository": "https://github.com/0xmmo/crew",
+  "license": "MIT",
+  "keywords": ["claude-code", "multi-agent", "sessions", "context", "messaging"],
+  "hooks": "./hooks/hooks.json"
+}

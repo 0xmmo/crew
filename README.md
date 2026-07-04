@@ -25,7 +25,7 @@ crew auto-injects what your other running [Claude Code](https://claude.com/claud
 - **Shared context, live** — every session knows what the rest of the crew is doing, refreshed as it changes.
 - **Agent-to-agent mail** — `crew send` drops a message into another agent's context within seconds, even mid-turn.
 - **A human view** — one command shows every session's status, recap, and transcript tail; `--json` for scripts and agents.
-- **Zero config** — `npm i -g` wires the hooks. Token-frugal and fail-safe by design; reads sessions, never touches them.
+- **Zero config** — `npm i -g` wires the hooks, or install it as a Claude Code plugin. Token-frugal and fail-safe by design; reads sessions, never touches them.
 
 ## Install
 
@@ -34,6 +34,15 @@ npm install -g @0xmmo/crew
 ```
 
 That's the whole setup: installing globally wires the hook into `~/.claude/settings.json` automatically. (If your npm has `ignore-scripts=true`, postinstall can't run — do it with `crew install-hook` once instead.) Requires Node.js ≥ 18. macOS and Linux.
+
+### Or as a Claude Code plugin
+
+```
+/plugin marketplace add 0xmmo/crew
+/plugin install crew@0xmmo
+```
+
+Same thing, zero `settings.json` edits: the plugin ships the four hooks and its own copy of the binary (fetched from npm), and `/plugin` manages updates. When the global `crew` command isn't installed, the context crew injects automatically points agents at the plugin's own entry point instead, so messaging still works. Pick either path — if you end up with both, the plugin defers to the global install so nothing is injected twice. The global install is still the way to get `crew` on your own PATH.
 
 ## What your agents see, live
 
@@ -132,7 +141,7 @@ Tool input/output is truncated by default; pass `--full` for the complete conten
 
 ## How the injection works
 
-`npm i -g` adds `crew --hook` to four Claude Code hook events:
+`npm i -g` adds `crew --hook` to four Claude Code hook events (the plugin install registers the same four, scoped to the plugin instead of your `settings.json`):
 
 - **`SessionStart`** — every new session (and every re-start after context compaction) opens knowing what the rest of the crew is doing.
 - **`UserPromptSubmit`** — the picture is refreshed before each of your messages, and queued mail is delivered with it.

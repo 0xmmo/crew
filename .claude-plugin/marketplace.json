@@ -1,0 +1,16 @@
+{
+  "name": "0xmmo",
+  "description": "Plugins by 0xmmo — crew: shared context and messaging for Claude Code agents.",
+  "owner": { "name": "Mo Moustafa", "url": "https://github.com/0xmmo" },
+  "plugins": [
+    {
+      "name": "crew",
+      "source": { "source": "npm", "package": "@0xmmo/crew" },
+      "description": "Claude Code agents that see each other: live shared context across sessions and agent-to-agent messaging. One checkout, no worktrees.",
+      "homepage": "https://github.com/0xmmo/crew",
+      "author": { "name": "0xmmo", "url": "https://github.com/0xmmo" },
+      "license": "MIT",
+      "keywords": ["claude-code", "multi-agent", "sessions", "context", "messaging"]
+    }
+  ]
+}
