@@ -20,6 +20,7 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "postinstall": "node dist/postinstall.js || true",
+    "version": "node -e \"const fs=require('fs');const v=require('./package.json').version;const p='.claude-plugin/plugin.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.version=v;fs.writeFileSync(p,JSON.stringify(j,null,2)+'\\n')\" && git add .claude-plugin/plugin.json",
     "send": "npm run build && git add . && (git diff --cached --quiet || git commit -am checkpoint) && npm version patch && npm login && npm publish"
   },
   "keywords": [
