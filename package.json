@@ -1,6 +1,6 @@
 {
   "name": "@0xmmo/crew",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Let Claude Code agents coordinate with shared context and agent-to-agent messaging. Ship at breakneck with no branches and no worktrees.",
   "type": "commonjs",
   "bin": {
