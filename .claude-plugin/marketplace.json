@@ -5,7 +5,7 @@
   "plugins": [
     {
       "name": "crew",
-      "source": { "source": "npm", "package": "@0xmmo/crew" },
+      "source": "./",
       "description": "Claude Code agents that see each other: live shared context across sessions and agent-to-agent messaging. One checkout, no worktrees.",
       "homepage": "https://github.com/0xmmo/crew",
       "author": { "name": "0xmmo", "url": "https://github.com/0xmmo" },
