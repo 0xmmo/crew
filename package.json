@@ -1,7 +1,7 @@
 {
   "name": "@0xmmo/crew",
   "version": "0.2.4",
-  "description": "Let Claude Code agents talk to each other: live shared context across sessions and agent-to-agent messaging. Ship features in parallel, no branches, no worktrees.",
+  "description": "Let Claude Code and Codex agents talk to each other: live shared context and agent-to-agent messaging across sessions.",
   "type": "commonjs",
   "bin": {
     "crew": "dist/crew.js"
@@ -9,6 +9,7 @@
   "files": [
     "dist",
     ".claude-plugin",
+    ".codex-plugin",
     "hooks",
     "README.md",
     "LICENSE"
@@ -19,13 +20,16 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test test/*.test.cjs",
     "postinstall": "node dist/postinstall.js || true",
-    "version": "node -e \"const fs=require('fs');const v=require('./package.json').version;const p='.claude-plugin/plugin.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.version=v;fs.writeFileSync(p,JSON.stringify(j,null,2)+'\\n')\" && git add .claude-plugin/plugin.json",
-    "send": "npm run build && node -e \"const fs=require('fs');const v=require('./package.json').version.split('.');v[2]=+v[2]+1;const p='.claude-plugin/plugin.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.version=v.join('.');fs.writeFileSync(p,JSON.stringify(j,null,2)+'\\n')\" && git add . && (git diff --cached --quiet || git commit -am checkpoint) && npm version patch && npm login && npm publish"
+    "version": "node -e \"const fs=require('fs');const v=require('./package.json').version;for(const p of ['.claude-plugin/plugin.json','.codex-plugin/plugin.json']){const j=JSON.parse(fs.readFileSync(p,'utf8'));j.version=v;fs.writeFileSync(p,JSON.stringify(j,null,2)+'\\n')}\" && git add .claude-plugin/plugin.json .codex-plugin/plugin.json",
+    "send": "npm run build && node -e \"const fs=require('fs');const v=require('./package.json').version.split('.');v[2]=+v[2]+1;for(const p of ['.claude-plugin/plugin.json','.codex-plugin/plugin.json']){const j=JSON.parse(fs.readFileSync(p,'utf8'));j.version=v.join('.');fs.writeFileSync(p,JSON.stringify(j,null,2)+'\\n')}\" && git add . && (git diff --cached --quiet || git commit -am checkpoint) && npm version patch && npm login && npm publish"
   },
   "keywords": [
     "claude",
     "claude-code",
+    "codex",
+    "openai-codex",
     "hooks",
     "context",
     "multi-agent",

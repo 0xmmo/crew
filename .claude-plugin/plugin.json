@@ -1,8 +1,8 @@
 {
   "name": "crew",
   "displayName": "crew",
-  "version": "0.2.4",
-  "description": "Let Claude Code agents talk to each other: live shared context across sessions and agent-to-agent messaging. Ship features in parallel, no branches, no worktrees.",
+  "version": "0.2.5",
+  "description": "Live shared context and messaging across Claude Code and Codex sessions.",
   "author": {
     "name": "0xmmo",
     "url": "https://github.com/0xmmo"
@@ -11,6 +11,7 @@
   "repository": "https://github.com/0xmmo/crew",
   "license": "MIT",
   "keywords": [
+    "codex",
     "claude-code",
     "multi-agent",
     "sessions",

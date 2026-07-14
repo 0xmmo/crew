@@ -1,19 +1,18 @@
 #!/usr/bin/env node
 /**
- * crew — shared context for Claude Code agents.
+ * crew — shared context for Claude Code and Codex agents.
  *
- * First and foremost a Claude Code hook: `crew --hook` reads the hook event on
+ * First and foremost an agent hook: `crew --hook` reads the hook event on
  * stdin and emits what your other running sessions are doing (status, recap,
  * transcript tail) as additionalContext, so every session automatically sees
  * the rest of the crew. Also a CLI for watching the same thing yourself.
  *
- * Every interactive Claude Code session writes ~/.claude/sessions/<pid>.json while
- * running. crew reads those, keeps the ones whose pid is still a live `claude`
- * process, then pulls each session's recap (the latest `away_summary`) and a tail
- * of its transcript.
+ * Claude sessions are discovered from Claude's live PID registry. Claude and
+ * Codex hooks also maintain a tiny product-neutral live registry, which lets
+ * sessions from both products share one view and mailbox.
  *
  *   crew --hook          hook mode: emit other sessions as additionalContext JSON
- *   crew install-hook    wire `crew --hook` into Claude Code settings.json
+ *   crew install-hook    wire `crew --hook` into Claude Code and Codex
  *   crew uninstall-hook  remove it
  *   crew send <t> "msg"  message another session (delivered via its hook)
  *   crew inbox           peek at this session's pending messages
@@ -34,9 +33,9 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  Agent,
   HOOK_COMMAND,
   hookInstalled,
   installHook,
@@ -53,6 +52,14 @@ import {
   pruneInboxes,
   sendMessage,
 } from "./mailbox";
+import {
+  HookSessionInput,
+  parentPid,
+  processCommand,
+  processExists,
+  recordHookSession,
+  registeredSessions,
+} from "./registry";
 
 const CLAUDE_HOME = process.env.CLAUDE_HOME || join(homedir(), ".claude");
 const SESS_DIR = join(CLAUDE_HOME, "sessions");
@@ -73,13 +80,13 @@ function onPath(bin: string): boolean {
   return false;
 }
 
-// When crew runs as a Claude Code plugin hook (CLAUDE_PLUGIN_ROOT is set) and
+// When crew runs as a Claude/Codex plugin hook and
 // there is no global `crew` on PATH, emitted guidance must name a command
 // agents can actually run: the plugin's own entry point.
 let cachedCliCmd: string | null = null;
 function cliCmd(): string {
   if (cachedCliCmd === null) {
-    const root = process.env.CLAUDE_PLUGIN_ROOT;
+    const root = process.env.PLUGIN_ROOT || process.env.CLAUDE_PLUGIN_ROOT;
     cachedCliCmd =
       root && !onPath("crew")
         ? `node "${join(root, "dist", "crew.js")}"`
@@ -105,6 +112,7 @@ interface Session {
   pid: number;
   sessionId: string;
   shortId: string;
+  agent: Agent;
   status: string;
   cwd: string;
   startedAt: string | null;
@@ -181,13 +189,13 @@ function underDir(cwd: string, dir: string | null): boolean {
 function printHelp(): void {
   process.stdout.write(
     [
-      "crew — shared context and messaging for Claude Code agents",
+      "crew — shared context and messaging for Claude Code and Codex agents",
       "",
-      "Hook (auto-injects other sessions into Claude Code context):",
+      "Hook (auto-injects other sessions into agent context):",
       "  crew --hook [N]       read a hook event on stdin, emit other sessions as",
       "                        additionalContext JSON (default N=5 tail entries)",
-      "  crew install-hook     wire `crew --hook` into Claude Code settings.json",
-      "  crew uninstall-hook   remove it",
+      "  crew install-hook     wire `crew --hook` into Claude Code and Codex",
+      "  crew uninstall-hook   remove it from both",
       "",
       "Messaging (delivered into the target agent's context via the hook):",
       '  crew send <t> "msg"   t = shortId prefix, pid, or cwd substring',
@@ -204,6 +212,8 @@ function printHelp(): void {
       "",
       "Env:",
       "  CLAUDE_HOME           override ~/.claude",
+      "  CODEX_HOME            override ~/.codex",
+      "  CREW_HOME             override shared state at ~/.crew",
       "  CREW_NO_HOOK=1        skip hook auto-install on `npm i -g`",
       "",
     ].join("\n"),
@@ -227,17 +237,6 @@ function trunc(s: string, n: number, full: boolean): string {
   if (full) return s;
   const flat = s.replace(/\s+/g, " ").trim();
   return flat.length <= n ? flat : flat.slice(0, n - 1) + "…";
-}
-
-/** Returns the process command line for pid, or null if no such process. */
-function processCommand(pid: number): string | null {
-  try {
-    return execFileSync("ps", ["-p", String(pid), "-o", "command="], {
-      encoding: "utf8",
-    }).trim();
-  } catch {
-    return null;
-  }
 }
 
 function localHHMM(ts: string | null): string {
@@ -275,8 +274,8 @@ interface Parsed {
   entries: Entry[];
 }
 
-/** Parse a transcript jsonl into the recap and an ordered list of entries. */
-function parseTranscript(path: string | null): Parsed {
+/** Parse a Claude transcript jsonl into the recap and ordered entries. */
+function parseClaudeTranscript(path: string | null): Parsed {
   const out: Parsed = { recap: null, total: 0, entries: [] };
   if (!path) return out;
   let raw: string;
@@ -352,9 +351,161 @@ function parseTranscript(path: string | null): Parsed {
   return out;
 }
 
+function textFromCodexOutput(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (!item || typeof item !== "object") return "";
+        const block = item as Record<string, unknown>;
+        return typeof block.text === "string"
+          ? block.text
+          : typeof block.output_text === "string"
+            ? block.output_text
+            : typeof block.content === "string"
+              ? block.content
+              : "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    for (const key of ["text", "output", "content"]) {
+      if (typeof obj[key] === "string") return obj[key] as string;
+    }
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
+function codexToolSummary(raw: unknown): string {
+  let value = raw;
+  if (typeof raw === "string") {
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      return raw;
+    }
+  }
+  if (!value || typeof value !== "object") return String(value ?? "");
+  const obj = value as Record<string, unknown>;
+  for (const key of [
+    "cmd",
+    "command",
+    "prompt",
+    "query",
+    "path",
+    "file_path",
+    "target",
+    "description",
+  ]) {
+    const candidate = obj[key];
+    if (typeof candidate === "string") return candidate;
+    if (Array.isArray(candidate)) return candidate.map(String).join(" ");
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Parse the useful, user-visible subset of a Codex rollout. The rollout is a
+ * convenience input rather than a stable API, so unknown records are skipped.
+ */
+function parseCodexTranscript(path: string | null): Parsed {
+  const out: Parsed = { recap: null, total: 0, entries: [] };
+  if (!path) return out;
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return out;
+  }
+  for (const line of raw.split("\n")) {
+    const s = line.trim();
+    if (!s) continue;
+    let record: any;
+    try {
+      record = JSON.parse(s);
+    } catch {
+      continue;
+    }
+    const ts: string | null = record.timestamp ?? null;
+    const payload = record.payload ?? {};
+    if (record.type === "event_msg") {
+      if (payload.type === "task_complete" && typeof payload.last_agent_message === "string") {
+        out.recap = clean(payload.last_agent_message);
+        continue;
+      }
+      if (payload.type !== "user_message" && payload.type !== "agent_message") continue;
+      const text = clean(typeof payload.message === "string" ? payload.message : "");
+      if (!text) continue;
+      out.entries.push({
+        ts,
+        role: payload.type === "user_message" ? "user" : "assistant",
+        kind: "text",
+        text,
+      });
+      out.total++;
+      continue;
+    }
+    if (record.type !== "response_item") continue;
+    const type = payload.type;
+    if (
+      type === "function_call" ||
+      type === "custom_tool_call" ||
+      type === "local_shell_call" ||
+      type === "web_search_call"
+    ) {
+      out.entries.push({
+        ts,
+        role: "assistant",
+        kind: "tool_use",
+        name: payload.name ?? (type === "web_search_call" ? "web_search" : type),
+        summary: codexToolSummary(
+          payload.arguments ?? payload.input ?? payload.command ?? payload.action ?? "",
+        ),
+      });
+      out.total++;
+      continue;
+    }
+    if (
+      type === "function_call_output" ||
+      type === "custom_tool_call_output" ||
+      type === "local_shell_call_output"
+    ) {
+      const text = clean(textFromCodexOutput(payload.output));
+      if (!text) continue;
+      out.entries.push({ ts, role: "tool", kind: "tool_result", text });
+      out.total++;
+    }
+  }
+  return out;
+}
+
+function parseTranscript(agent: Agent, path: string | null): Parsed {
+  return agent === "codex"
+    ? parseCodexTranscript(path)
+    : parseClaudeTranscript(path);
+}
+
 // ---------- discovery ----------
 
-function collectSessions(opts: Opts): Session[] {
+function liveClaudePid(pid: number): boolean {
+  const command = processCommand(pid);
+  if (command !== null) return /(^|[\s/])claude(?:\s|$)/i.test(command);
+  return processExists(pid);
+}
+
+function collectClaudeSessions(opts: Opts): Session[] {
   let files: string[];
   try {
     files = readdirSync(SESS_DIR).filter((f) => f.endsWith(".json"));
@@ -374,19 +525,18 @@ function collectSessions(opts: Opts): Session[] {
     const cwd: string = meta.cwd ?? "";
     if (!underDir(cwd, opts.dir)) continue; // outside the requested directory
 
-    const cmd = processCommand(pid);
-    if (cmd === null) continue; // dead / stale session file
-    if (!cmd.includes("claude")) continue; // pid reused by something else
+    if (!liveClaudePid(pid)) continue;
 
     const sid: string = meta.sessionId ?? "";
     const transcript = findTranscript(cwd, sid);
-    const parsed = parseTranscript(transcript);
+    const parsed = parseTranscript("claude", transcript);
     const tail = parsed.entries.slice(-opts.tailN);
 
     sessions.push({
       pid,
       sessionId: sid,
       shortId: sid.slice(0, 8),
+      agent: "claude",
       status: meta.status ?? "",
       cwd,
       startedAt:
@@ -401,9 +551,37 @@ function collectSessions(opts: Opts): Session[] {
       pendingMessages: pendingCount(sid),
     });
   }
-  // Most-recently-started first.
-  sessions.sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? ""));
   return sessions;
+}
+
+function collectSessions(opts: Opts): Session[] {
+  const byId = new Map<string, Session>();
+  for (const session of collectClaudeSessions(opts)) {
+    byId.set(session.sessionId, session);
+  }
+  for (const meta of registeredSessions()) {
+    if (byId.has(meta.sessionId) || !underDir(meta.cwd, opts.dir)) continue;
+    const parsed = parseTranscript(meta.agent, meta.transcript);
+    const tail = parsed.entries.slice(-opts.tailN);
+    byId.set(meta.sessionId, {
+      pid: meta.pid,
+      sessionId: meta.sessionId,
+      shortId: meta.sessionId.slice(0, 8),
+      agent: meta.agent,
+      status: meta.status,
+      cwd: meta.cwd,
+      startedAt: meta.startedAt,
+      transcript: meta.transcript,
+      recap: parsed.recap,
+      messageCount: parsed.total,
+      tailCount: tail.length,
+      tail,
+      pendingMessages: pendingCount(meta.sessionId),
+    });
+  }
+  return [...byId.values()].sort((a, b) =>
+    (b.startedAt ?? "").localeCompare(a.startedAt ?? ""),
+  );
 }
 
 // ---------- messaging ----------
@@ -411,43 +589,45 @@ function collectSessions(opts: Opts): Session[] {
 interface SessionRef {
   pid: number;
   sessionId: string;
+  agent: Agent;
   cwd: string;
 }
 
-/** Lightweight session list (no transcripts): live claude pids only. */
+/** Lightweight cross-product live-session list (no transcript parsing). */
 function listSessionRefs(): SessionRef[] {
+  const byId = new Map<string, SessionRef>();
   let files: string[];
   try {
     files = readdirSync(SESS_DIR).filter((f) => f.endsWith(".json"));
   } catch {
-    return [];
+    files = [];
   }
-  const refs: SessionRef[] = [];
   for (const f of files) {
     try {
       const meta = JSON.parse(readFileSync(join(SESS_DIR, f), "utf8"));
       const pid = Number(meta.pid);
       if (!pid || typeof meta.sessionId !== "string") continue;
-      const cmd = processCommand(pid);
-      if (!cmd || !cmd.includes("claude")) continue;
-      refs.push({ pid, sessionId: meta.sessionId, cwd: meta.cwd ?? "" });
+      if (!liveClaudePid(pid)) continue;
+      byId.set(meta.sessionId, {
+        pid,
+        sessionId: meta.sessionId,
+        agent: "claude",
+        cwd: meta.cwd ?? "",
+      });
     } catch {
       continue;
     }
   }
-  return refs;
-}
-
-function parentPid(pid: number): number | null {
-  try {
-    const out = execFileSync("ps", ["-p", String(pid), "-o", "ppid="], {
-      encoding: "utf8",
-    }).trim();
-    const p = parseInt(out, 10);
-    return Number.isFinite(p) && p > 1 ? p : null;
-  } catch {
-    return null;
+  for (const session of registeredSessions()) {
+    if (byId.has(session.sessionId)) continue;
+    byId.set(session.sessionId, {
+      pid: session.pid,
+      sessionId: session.sessionId,
+      agent: session.agent,
+      cwd: session.cwd,
+    });
   }
+  return [...byId.values()];
 }
 
 /**
@@ -456,6 +636,11 @@ function parentPid(pid: number): number | null {
  * agent's shell to that agent. Null when run from a plain terminal.
  */
 function senderSession(refs: SessionRef[]): SessionRef | null {
+  const envSid = process.env.CODEX_THREAD_ID || process.env.CLAUDE_SESSION_ID;
+  if (envSid) {
+    const exact = refs.find((ref) => ref.sessionId === envSid);
+    if (exact) return exact;
+  }
   const byPid = new Map(refs.map((r) => [r.pid, r]));
   let pid: number | null = process.ppid;
   for (let depth = 0; pid && depth < 15; depth++) {
@@ -475,7 +660,9 @@ function parseTtl(s: string): number | null {
 
 function listRefsTo(stream: NodeJS.WriteStream, refs: SessionRef[]): void {
   for (const r of refs) {
-    stream.write(`  ${r.sessionId.slice(0, 8)}  pid ${r.pid}  ${r.cwd}\n`);
+    stream.write(
+      `  ${r.sessionId.slice(0, 8)}  ${r.agent}  pid ${r.pid}  ${r.cwd}\n`,
+    );
   }
 }
 
@@ -554,7 +741,7 @@ function runInbox(): void {
   const refs = listSessionRefs();
   const me = senderSession(refs);
   if (!me) {
-    process.stderr.write("crew: not inside a Claude Code session — no inbox\n");
+    process.stderr.write("crew: not inside a known agent session — no inbox\n");
     process.exit(1);
   }
   const msgs = peekInbox(me.sessionId);
@@ -582,7 +769,7 @@ function renderText(sessions: Session[], opts: Opts): string {
       "\n════════════════════════════════════════════════════════════════════",
     );
     lines.push(
-      `${EMOJI[s.status] ?? "⚫"}  ${s.shortId}   pid ${s.pid}   status: ${s.status}`,
+      `${EMOJI[s.status] ?? "⚫"}  ${s.shortId}   ${s.agent}   pid ${s.pid}   status: ${s.status}`,
     );
     const started = s.startedAt
       ? new Date(s.startedAt).toLocaleString()
@@ -637,10 +824,7 @@ function renderJson(sessions: Session[], opts: Opts): string {
 
 // ---------- hook mode ----------
 
-interface HookInput {
-  session_id?: string;
-  hook_event_name?: string;
-}
+interface HookInput extends HookSessionInput {}
 
 function readHookInput(): HookInput {
   if (process.stdin.isTTY) return {};
@@ -657,12 +841,14 @@ function renderHookContext(sessions: Session[]): string {
   const MAX_SESSIONS = 8;
   const shown = sessions.slice(0, MAX_SESSIONS);
   const lines: string[] = [
-    `${sessions.length} other Claude Code session(s) running on this machine right now. ` +
+    `${sessions.length} other agent session(s) running on this machine right now. ` +
       `Consider them before starting overlapping work; run \`${cliCmd()}\` for the full view.`,
   ];
   for (const s of shown) {
     lines.push("");
-    lines.push(`• ${s.shortId} — ${s.status || "unknown"} — ${s.cwd}`);
+    lines.push(
+      `• ${s.shortId} — ${s.agent} — ${s.status || "unknown"} — ${s.cwd}`,
+    );
     if (s.recap) lines.push(`  recap: ${trunc(s.recap, 300, false)}`);
     for (const e of s.tail) {
       const t = localHHMM(e.ts);
@@ -749,7 +935,15 @@ const HOOK_EVENT_NAMES = new Set([
   "Stop",
 ]);
 
-function emitHook(event: string, context: string): void {
+function emitHook(agent: Agent, event: string, context: string): void {
+  // Codex Stop uses a continuation reason rather than additionalContext. This
+  // makes pending mail model-visible before the session becomes idle.
+  if (agent === "codex" && event === "Stop") {
+    process.stdout.write(
+      JSON.stringify({ decision: "block", reason: context }) + "\n",
+    );
+    return;
+  }
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: { hookEventName: event, additionalContext: context },
@@ -761,14 +955,17 @@ function runHook(opts: Opts): void {
   // Never exit non-zero: exit 2 on UserPromptSubmit would block the prompt,
   // and on Stop it would force the agent to continue.
   try {
-    // Installed both ways (plugin + settings.json hook)? Defer to the
-    // settings-level hook so context is never injected twice. Only defers
-    // when the global `crew` actually resolves, so a stale settings entry
-    // can't silence both copies.
-    if (process.env.CLAUDE_PLUGIN_ROOT && onPath("crew") && hookInstalled()) {
+    const input = readHookInput();
+    const agent = recordHookSession(input);
+    // Installed both ways (plugin + user hook)? Defer to the global hook so
+    // context is never injected twice. Only defer when `crew` resolves.
+    if (
+      (process.env.PLUGIN_ROOT || process.env.CLAUDE_PLUGIN_ROOT) &&
+      onPath("crew") &&
+      hookInstalled(agent)
+    ) {
       return;
     }
-    const input = readHookInput();
     const event = HOOK_EVENT_NAMES.has(input.hook_event_name ?? "")
       ? (input.hook_event_name as string)
       : "SessionStart";
@@ -778,14 +975,12 @@ function runHook(opts: Opts): void {
     // deliver mail: one inbox readdir, no session/transcript scan, and total
     // silence (zero tokens) when there's none.
     if (event === "PostToolUse" || event === "Stop") {
-      if (messages.length > 0) emitHook(event, renderMessages(messages));
+      if (messages.length > 0) emitHook(agent, event, renderMessages(messages));
       return;
     }
     if (!opts.tailSet) opts.tailN = 5;
     pruneInboxes();
-    const sessions = collectSessions(opts).filter(
-      (s) => s.sessionId !== sid && s.pid !== process.ppid,
-    );
+    const sessions = collectSessions(opts).filter((s) => s.sessionId !== sid);
     const status = sessions.length > 0 ? renderHookContext(sessions) : "";
     if (!status && messages.length === 0) return; // nothing to inject, zero tokens spent
     // The unchanged-status throttle only applies to the status block; queued
@@ -798,7 +993,11 @@ function runHook(opts: Opts): void {
       return;
     }
     if (status) rememberEmit(sid, status);
-    emitHook(event, [renderMessages(messages), status].filter(Boolean).join("\n\n"));
+    emitHook(
+      agent,
+      event,
+      [renderMessages(messages), status].filter(Boolean).join("\n\n"),
+    );
   } catch {
     // swallow everything; a broken hook must not break the session
   }
@@ -807,28 +1006,32 @@ function runHook(opts: Opts): void {
 // ---------- settings commands ----------
 
 function runSettingsCommand(mode: "install-hook" | "uninstall-hook"): void {
-  const path = settingsPath();
-  const shown = tildify(path);
-  try {
-    if (mode === "install-hook") {
-      const r = installHook(path);
-      process.stdout.write(
-        r === "installed"
-          ? "✓ crew wired into Claude Code — your sessions now see each other. Undo: crew uninstall-hook\n"
-          : "✓ already wired — nothing to change.\n",
-      );
-    } else {
-      const r = uninstallHook(path);
-      process.stdout.write(
-        r === "removed"
-          ? "✓ crew hook removed.\n"
-          : `crew: no hook found in ${shown} — nothing to remove.\n`,
-      );
+  const labels: Record<Agent, string> = { claude: "Claude Code", codex: "Codex" };
+  let failed = false;
+  for (const agent of ["claude", "codex"] as const) {
+    const shown = tildify(settingsPath(agent));
+    try {
+      if (mode === "install-hook") {
+        const result = installHook(agent);
+        process.stdout.write(
+          result === "installed"
+            ? `✓ crew wired into ${labels[agent]} (${shown}).\n`
+            : `✓ ${labels[agent]} already wired — nothing to change.\n`,
+        );
+      } else {
+        const result = uninstallHook(agent);
+        process.stdout.write(
+          result === "removed"
+            ? `✓ crew hook removed from ${labels[agent]}.\n`
+            : `crew: no hook found in ${shown} — nothing to remove.\n`,
+        );
+      }
+    } catch (err) {
+      failed = true;
+      process.stderr.write(`crew: ${labels[agent]}: ${(err as Error).message}\n`);
     }
-  } catch (err) {
-    process.stderr.write(`crew: ${(err as Error).message}\n`);
-    process.exit(1);
   }
+  if (failed) process.exitCode = 1;
 }
 
 // ---------- main ----------
@@ -853,10 +1056,6 @@ function main(): void {
     runHook(opts);
     return;
   }
-  if (!existsSync(SESS_DIR)) {
-    process.stderr.write(`crew: no sessions dir at ${SESS_DIR}\n`);
-    process.exit(1);
-  }
   const sessions = collectSessions(opts);
   const out =
     opts.format === "json" ? renderJson(sessions, opts) : renderText(sessions, opts);
@@ -868,11 +1067,15 @@ function main(): void {
   if (
     opts.format === "text" &&
     process.env.CREW_NO_HOOK !== "1" &&
-    !hookInstalled()
+    (!hookInstalled("claude") || !hookInstalled("codex"))
   ) {
+    const missing = (["claude", "codex"] as const)
+      .filter((agent) => !hookInstalled(agent))
+      .map((agent) => (agent === "claude" ? "Claude Code" : "Codex"))
+      .join(" and ");
     process.stderr.write(
-      "\ncrew: context hook not installed — your Claude Code sessions can't see each other yet.\n" +
-        `crew: run \`crew install-hook\` to wire \`${HOOK_COMMAND}\` into ${settingsPath()}.\n`,
+      `\ncrew: context hook not installed for ${missing}.\n` +
+        `crew: run \`crew install-hook\` to wire \`${HOOK_COMMAND}\` into both agents.\n`,
     );
   }
 }

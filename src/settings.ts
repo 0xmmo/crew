@@ -1,18 +1,16 @@
 /**
- * settings.ts — wire crew's context hook into Claude Code's user settings.
+ * settings.ts — wire crew's context hook into Claude Code and Codex.
  *
- * Adds `crew --hook` under SessionStart (no matcher = every source, including
- * post-compaction re-injection) and UserPromptSubmit, so each session sees
- * what the other running sessions are doing — plus PostToolUse and Stop,
- * which only deliver `crew send` messages (cheap inbox check, silent when
- * empty) so mail reaches a busy agent mid-turn. Merges into the existing
- * settings.json without touching anything else; never writes over a file it
- * could not parse.
+ * Both products use the same hook event/config shape. We merge crew into each
+ * user hook file without touching unrelated settings and never write over a
+ * file we cannot parse.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
+
+export type Agent = "claude" | "codex";
 
 export const HOOK_COMMAND = "crew --hook";
 
@@ -29,7 +27,11 @@ export function tildify(path: string): string {
   return path.startsWith(home) ? "~" + path.slice(home.length) : path;
 }
 
-export function settingsPath(): string {
+export function settingsPath(agent: Agent = "claude"): string {
+  if (agent === "codex") {
+    const dir = process.env.CODEX_HOME || join(homedir(), ".codex");
+    return join(dir, "hooks.json");
+  }
   const dir =
     process.env.CLAUDE_CONFIG_DIR ||
     process.env.CLAUDE_HOME ||
@@ -68,10 +70,10 @@ function readSettings(path: string): Record<string, any> {
   return parsed;
 }
 
-/** True if the crew hook is wired into any supported event. Never throws. */
-export function hookInstalled(path = settingsPath()): boolean {
+/** True if crew is wired into any supported event for an agent. Never throws. */
+export function hookInstalled(agent: Agent = "claude"): boolean {
   try {
-    const hooks = readSettings(path).hooks;
+    const hooks = readSettings(settingsPath(agent)).hooks;
     if (!hooks || typeof hooks !== "object") return false;
     return HOOK_EVENTS.some(
       (event) => Array.isArray(hooks[event]) && hasCrewHook(hooks[event]),
@@ -83,7 +85,8 @@ export function hookInstalled(path = settingsPath()): boolean {
 
 export type InstallResult = "installed" | "already-installed";
 
-export function installHook(path = settingsPath()): InstallResult {
+export function installHook(agent: Agent = "claude"): InstallResult {
+  const path = settingsPath(agent);
   const settings = readSettings(path);
   const hooks = (settings.hooks ??= {});
   if (typeof hooks !== "object" || Array.isArray(hooks)) {
@@ -107,7 +110,8 @@ export function installHook(path = settingsPath()): InstallResult {
 
 export type UninstallResult = "removed" | "not-installed";
 
-export function uninstallHook(path = settingsPath()): UninstallResult {
+export function uninstallHook(agent: Agent = "claude"): UninstallResult {
+  const path = settingsPath(agent);
   if (!existsSync(path)) return "not-installed";
   const settings = readSettings(path);
   const hooks = settings.hooks;

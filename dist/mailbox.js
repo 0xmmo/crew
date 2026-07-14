@@ -1,8 +1,8 @@
 "use strict";
 /**
- * mailbox.ts — file-based messaging between Claude Code sessions.
+ * mailbox.ts — file-based messaging between Claude Code and Codex sessions.
  *
- * `crew send` drops a JSON file into ~/.claude/crew/inbox/<session-id>/; the
+ * `crew send` drops a JSON file into ~/.crew/inbox/<session-id>/; the
  * target session's `crew --hook` drains its inbox on its next hook event and
  * injects the messages as additionalContext. Claiming a message renames it
  * first, so racing hook events deliver each message at most once.
@@ -16,10 +16,10 @@ exports.drainInbox = drainInbox;
 exports.pruneInboxes = pruneInboxes;
 const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
-const node_os_1 = require("node:os");
 const node_crypto_1 = require("node:crypto");
-const CLAUDE_HOME = process.env.CLAUDE_HOME || (0, node_path_1.join)((0, node_os_1.homedir)(), ".claude");
-exports.INBOX_ROOT = (0, node_path_1.join)(CLAUDE_HOME, "crew", "inbox");
+const home_1 = require("./home");
+exports.INBOX_ROOT = (0, node_path_1.join)((0, home_1.crewHome)(), "inbox");
+const LEGACY_INBOX_ROOT = (0, node_path_1.join)((0, home_1.legacyCrewHome)(), "inbox");
 // Sessions can come back via --resume, so mail is pruned by age, not liveness.
 const MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000;
 // A coordination message that arrives a day late is noise; expire undelivered
@@ -29,8 +29,8 @@ function expired(m) {
     const t = Date.parse(m.expiresAt ?? "");
     return Number.isFinite(t) && t < Date.now();
 }
-function inboxDir(sid) {
-    return (0, node_path_1.join)(exports.INBOX_ROOT, sid);
+function inboxDir(sid, root = exports.INBOX_ROOT) {
+    return (0, node_path_1.join)(root, sid);
 }
 function sendMessage(targetSid, msg) {
     const dir = inboxDir(targetSid);
@@ -40,11 +40,31 @@ function sendMessage(targetSid, msg) {
     (0, node_fs_1.writeFileSync)(tmp, JSON.stringify(msg));
     (0, node_fs_1.renameSync)(tmp, (0, node_path_1.join)(dir, name));
 }
+function inboxRoots() {
+    return exports.INBOX_ROOT === LEGACY_INBOX_ROOT
+        ? [exports.INBOX_ROOT]
+        : [exports.INBOX_ROOT, LEGACY_INBOX_ROOT];
+}
 function listMessageFiles(sid) {
+    const out = [];
+    for (const root of inboxRoots()) {
+        try {
+            out.push(...(0, node_fs_1.readdirSync)(inboxDir(sid, root))
+                .filter((f) => f.endsWith(".json") && !f.startsWith("."))
+                .map((name) => ({ root, name })));
+        }
+        catch {
+            // no inbox in this root
+        }
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+function messagePath(sid, file) {
+    return (0, node_path_1.join)(inboxDir(sid, file.root), file.name);
+}
+function listDirs(root) {
     try {
-        return (0, node_fs_1.readdirSync)(inboxDir(sid))
-            .filter((f) => f.endsWith(".json") && !f.startsWith("."))
-            .sort();
+        return (0, node_fs_1.readdirSync)(root);
     }
     catch {
         return [];
@@ -55,7 +75,7 @@ function peekInbox(sid) {
     const out = [];
     for (const f of listMessageFiles(sid)) {
         try {
-            const m = JSON.parse((0, node_fs_1.readFileSync)((0, node_path_1.join)(inboxDir(sid), f), "utf8"));
+            const m = JSON.parse((0, node_fs_1.readFileSync)(messagePath(sid, f), "utf8"));
             if (!expired(m))
                 out.push(m);
         }
@@ -72,7 +92,7 @@ function pendingCount(sid) {
 function drainInbox(sid) {
     const out = [];
     for (const f of listMessageFiles(sid)) {
-        const path = (0, node_path_1.join)(inboxDir(sid), f);
+        const path = messagePath(sid, f);
         const claimed = `${path}.claimed`;
         try {
             (0, node_fs_1.renameSync)(path, claimed); // throws if another drain won the race
@@ -94,27 +114,22 @@ function drainInbox(sid) {
 }
 /** Drop messages older than MAX_AGE_MS and remove emptied inbox dirs. */
 function pruneInboxes() {
-    let dirs;
-    try {
-        dirs = (0, node_fs_1.readdirSync)(exports.INBOX_ROOT);
-    }
-    catch {
-        return;
-    }
     const cutoff = Date.now() - MAX_AGE_MS;
-    for (const d of dirs) {
-        const dir = (0, node_path_1.join)(exports.INBOX_ROOT, d);
-        try {
-            for (const f of (0, node_fs_1.readdirSync)(dir)) {
-                const p = (0, node_path_1.join)(dir, f);
-                if ((0, node_fs_1.statSync)(p).mtimeMs < cutoff)
-                    (0, node_fs_1.unlinkSync)(p);
+    for (const root of inboxRoots()) {
+        for (const d of listDirs(root)) {
+            const dir = (0, node_path_1.join)(root, d);
+            try {
+                for (const f of (0, node_fs_1.readdirSync)(dir)) {
+                    const p = (0, node_path_1.join)(dir, f);
+                    if ((0, node_fs_1.statSync)(p).mtimeMs < cutoff)
+                        (0, node_fs_1.unlinkSync)(p);
+                }
+                if ((0, node_fs_1.readdirSync)(dir).length === 0)
+                    (0, node_fs_1.rmSync)(dir, { recursive: true });
             }
-            if ((0, node_fs_1.readdirSync)(dir).length === 0)
-                (0, node_fs_1.rmSync)(dir, { recursive: true });
-        }
-        catch {
-            // another process may be touching this inbox right now; fine
+            catch {
+                // another process may be touching this inbox right now; fine
+            }
         }
     }
 }

@@ -1,0 +1,34 @@
+{
+  "name": "crew",
+  "version": "0.2.5",
+  "description": "Live shared context and messaging across Claude Code and Codex sessions.",
+  "author": {
+    "name": "0xmmo",
+    "url": "https://github.com/0xmmo"
+  },
+  "homepage": "https://github.com/0xmmo/crew",
+  "repository": "https://github.com/0xmmo/crew",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "claude-code",
+    "multi-agent",
+    "sessions",
+    "context",
+    "messaging"
+  ],
+  "interface": {
+    "displayName": "crew",
+    "shortDescription": "Shared context and messaging for coding agents",
+    "longDescription": "See live Claude Code and Codex sessions in one shared crew, coordinate overlapping work, and send messages directly between agents.",
+    "developerName": "0xmmo",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "websiteURL": "https://github.com/0xmmo/crew",
+    "defaultPrompt": [
+      "Show me what the rest of my crew is working on."
+    ]
+  }
+}

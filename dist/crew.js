@@ -1,20 +1,19 @@
 #!/usr/bin/env node
 "use strict";
 /**
- * crew — shared context for Claude Code agents.
+ * crew — shared context for Claude Code and Codex agents.
  *
- * First and foremost a Claude Code hook: `crew --hook` reads the hook event on
+ * First and foremost an agent hook: `crew --hook` reads the hook event on
  * stdin and emits what your other running sessions are doing (status, recap,
  * transcript tail) as additionalContext, so every session automatically sees
  * the rest of the crew. Also a CLI for watching the same thing yourself.
  *
- * Every interactive Claude Code session writes ~/.claude/sessions/<pid>.json while
- * running. crew reads those, keeps the ones whose pid is still a live `claude`
- * process, then pulls each session's recap (the latest `away_summary`) and a tail
- * of its transcript.
+ * Claude sessions are discovered from Claude's live PID registry. Claude and
+ * Codex hooks also maintain a tiny product-neutral live registry, which lets
+ * sessions from both products share one view and mailbox.
  *
  *   crew --hook          hook mode: emit other sessions as additionalContext JSON
- *   crew install-hook    wire `crew --hook` into Claude Code settings.json
+ *   crew install-hook    wire `crew --hook` into Claude Code and Codex
  *   crew uninstall-hook  remove it
  *   crew send <t> "msg"  message another session (delivered via its hook)
  *   crew inbox           peek at this session's pending messages
@@ -28,10 +27,10 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
 const node_os_1 = require("node:os");
-const node_child_process_1 = require("node:child_process");
 const node_crypto_1 = require("node:crypto");
 const settings_1 = require("./settings");
 const mailbox_1 = require("./mailbox");
+const registry_1 = require("./registry");
 const CLAUDE_HOME = process.env.CLAUDE_HOME || (0, node_path_1.join)((0, node_os_1.homedir)(), ".claude");
 const SESS_DIR = (0, node_path_1.join)(CLAUDE_HOME, "sessions");
 const PROJ_DIR = (0, node_path_1.join)(CLAUDE_HOME, "projects");
@@ -50,13 +49,13 @@ function onPath(bin) {
     }
     return false;
 }
-// When crew runs as a Claude Code plugin hook (CLAUDE_PLUGIN_ROOT is set) and
+// When crew runs as a Claude/Codex plugin hook and
 // there is no global `crew` on PATH, emitted guidance must name a command
 // agents can actually run: the plugin's own entry point.
 let cachedCliCmd = null;
 function cliCmd() {
     if (cachedCliCmd === null) {
-        const root = process.env.CLAUDE_PLUGIN_ROOT;
+        const root = process.env.PLUGIN_ROOT || process.env.CLAUDE_PLUGIN_ROOT;
         cachedCliCmd =
             root && !onPath("crew")
                 ? `node "${(0, node_path_1.join)(root, "dist", "crew.js")}"`
@@ -123,13 +122,13 @@ function underDir(cwd, dir) {
 }
 function printHelp() {
     process.stdout.write([
-        "crew — shared context and messaging for Claude Code agents",
+        "crew — shared context and messaging for Claude Code and Codex agents",
         "",
-        "Hook (auto-injects other sessions into Claude Code context):",
+        "Hook (auto-injects other sessions into agent context):",
         "  crew --hook [N]       read a hook event on stdin, emit other sessions as",
         "                        additionalContext JSON (default N=5 tail entries)",
-        "  crew install-hook     wire `crew --hook` into Claude Code settings.json",
-        "  crew uninstall-hook   remove it",
+        "  crew install-hook     wire `crew --hook` into Claude Code and Codex",
+        "  crew uninstall-hook   remove it from both",
         "",
         "Messaging (delivered into the target agent's context via the hook):",
         '  crew send <t> "msg"   t = shortId prefix, pid, or cwd substring',
@@ -146,6 +145,8 @@ function printHelp() {
         "",
         "Env:",
         "  CLAUDE_HOME           override ~/.claude",
+        "  CODEX_HOME            override ~/.codex",
+        "  CREW_HOME             override shared state at ~/.crew",
         "  CREW_NO_HOOK=1        skip hook auto-install on `npm i -g`",
         "",
     ].join("\n"));
@@ -166,17 +167,6 @@ function trunc(s, n, full) {
         return s;
     const flat = s.replace(/\s+/g, " ").trim();
     return flat.length <= n ? flat : flat.slice(0, n - 1) + "…";
-}
-/** Returns the process command line for pid, or null if no such process. */
-function processCommand(pid) {
-    try {
-        return (0, node_child_process_1.execFileSync)("ps", ["-p", String(pid), "-o", "command="], {
-            encoding: "utf8",
-        }).trim();
-    }
-    catch {
-        return null;
-    }
 }
 function localHHMM(ts) {
     if (!ts)
@@ -209,8 +199,8 @@ function findTranscript(cwd, sid) {
     }
     return null;
 }
-/** Parse a transcript jsonl into the recap and an ordered list of entries. */
-function parseTranscript(path) {
+/** Parse a Claude transcript jsonl into the recap and ordered entries. */
+function parseClaudeTranscript(path) {
     const out = { recap: null, total: 0, entries: [] };
     if (!path)
         return out;
@@ -293,8 +283,168 @@ function parseTranscript(path) {
     }
     return out;
 }
+function textFromCodexOutput(value) {
+    if (typeof value === "string")
+        return value;
+    if (Array.isArray(value)) {
+        return value
+            .map((item) => {
+            if (typeof item === "string")
+                return item;
+            if (!item || typeof item !== "object")
+                return "";
+            const block = item;
+            return typeof block.text === "string"
+                ? block.text
+                : typeof block.output_text === "string"
+                    ? block.output_text
+                    : typeof block.content === "string"
+                        ? block.content
+                        : "";
+        })
+            .filter(Boolean)
+            .join("\n");
+    }
+    if (value && typeof value === "object") {
+        const obj = value;
+        for (const key of ["text", "output", "content"]) {
+            if (typeof obj[key] === "string")
+                return obj[key];
+        }
+        try {
+            return JSON.stringify(value);
+        }
+        catch {
+            return "";
+        }
+    }
+    return "";
+}
+function codexToolSummary(raw) {
+    let value = raw;
+    if (typeof raw === "string") {
+        try {
+            value = JSON.parse(raw);
+        }
+        catch {
+            return raw;
+        }
+    }
+    if (!value || typeof value !== "object")
+        return String(value ?? "");
+    const obj = value;
+    for (const key of [
+        "cmd",
+        "command",
+        "prompt",
+        "query",
+        "path",
+        "file_path",
+        "target",
+        "description",
+    ]) {
+        const candidate = obj[key];
+        if (typeof candidate === "string")
+            return candidate;
+        if (Array.isArray(candidate))
+            return candidate.map(String).join(" ");
+    }
+    try {
+        return JSON.stringify(value);
+    }
+    catch {
+        return "";
+    }
+}
+/**
+ * Parse the useful, user-visible subset of a Codex rollout. The rollout is a
+ * convenience input rather than a stable API, so unknown records are skipped.
+ */
+function parseCodexTranscript(path) {
+    const out = { recap: null, total: 0, entries: [] };
+    if (!path)
+        return out;
+    let raw;
+    try {
+        raw = (0, node_fs_1.readFileSync)(path, "utf8");
+    }
+    catch {
+        return out;
+    }
+    for (const line of raw.split("\n")) {
+        const s = line.trim();
+        if (!s)
+            continue;
+        let record;
+        try {
+            record = JSON.parse(s);
+        }
+        catch {
+            continue;
+        }
+        const ts = record.timestamp ?? null;
+        const payload = record.payload ?? {};
+        if (record.type === "event_msg") {
+            if (payload.type === "task_complete" && typeof payload.last_agent_message === "string") {
+                out.recap = clean(payload.last_agent_message);
+                continue;
+            }
+            if (payload.type !== "user_message" && payload.type !== "agent_message")
+                continue;
+            const text = clean(typeof payload.message === "string" ? payload.message : "");
+            if (!text)
+                continue;
+            out.entries.push({
+                ts,
+                role: payload.type === "user_message" ? "user" : "assistant",
+                kind: "text",
+                text,
+            });
+            out.total++;
+            continue;
+        }
+        if (record.type !== "response_item")
+            continue;
+        const type = payload.type;
+        if (type === "function_call" ||
+            type === "custom_tool_call" ||
+            type === "local_shell_call" ||
+            type === "web_search_call") {
+            out.entries.push({
+                ts,
+                role: "assistant",
+                kind: "tool_use",
+                name: payload.name ?? (type === "web_search_call" ? "web_search" : type),
+                summary: codexToolSummary(payload.arguments ?? payload.input ?? payload.command ?? payload.action ?? ""),
+            });
+            out.total++;
+            continue;
+        }
+        if (type === "function_call_output" ||
+            type === "custom_tool_call_output" ||
+            type === "local_shell_call_output") {
+            const text = clean(textFromCodexOutput(payload.output));
+            if (!text)
+                continue;
+            out.entries.push({ ts, role: "tool", kind: "tool_result", text });
+            out.total++;
+        }
+    }
+    return out;
+}
+function parseTranscript(agent, path) {
+    return agent === "codex"
+        ? parseCodexTranscript(path)
+        : parseClaudeTranscript(path);
+}
 // ---------- discovery ----------
-function collectSessions(opts) {
+function liveClaudePid(pid) {
+    const command = (0, registry_1.processCommand)(pid);
+    if (command !== null)
+        return /(^|[\s/])claude(?:\s|$)/i.test(command);
+    return (0, registry_1.processExists)(pid);
+}
+function collectClaudeSessions(opts) {
     let files;
     try {
         files = (0, node_fs_1.readdirSync)(SESS_DIR).filter((f) => f.endsWith(".json"));
@@ -317,19 +467,17 @@ function collectSessions(opts) {
         const cwd = meta.cwd ?? "";
         if (!underDir(cwd, opts.dir))
             continue; // outside the requested directory
-        const cmd = processCommand(pid);
-        if (cmd === null)
-            continue; // dead / stale session file
-        if (!cmd.includes("claude"))
-            continue; // pid reused by something else
+        if (!liveClaudePid(pid))
+            continue;
         const sid = meta.sessionId ?? "";
         const transcript = findTranscript(cwd, sid);
-        const parsed = parseTranscript(transcript);
+        const parsed = parseTranscript("claude", transcript);
         const tail = parsed.entries.slice(-opts.tailN);
         sessions.push({
             pid,
             sessionId: sid,
             shortId: sid.slice(0, 8),
+            agent: "claude",
             status: meta.status ?? "",
             cwd,
             startedAt: typeof meta.startedAt === "number"
@@ -343,48 +491,76 @@ function collectSessions(opts) {
             pendingMessages: (0, mailbox_1.pendingCount)(sid),
         });
     }
-    // Most-recently-started first.
-    sessions.sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? ""));
     return sessions;
 }
-/** Lightweight session list (no transcripts): live claude pids only. */
+function collectSessions(opts) {
+    const byId = new Map();
+    for (const session of collectClaudeSessions(opts)) {
+        byId.set(session.sessionId, session);
+    }
+    for (const meta of (0, registry_1.registeredSessions)()) {
+        if (byId.has(meta.sessionId) || !underDir(meta.cwd, opts.dir))
+            continue;
+        const parsed = parseTranscript(meta.agent, meta.transcript);
+        const tail = parsed.entries.slice(-opts.tailN);
+        byId.set(meta.sessionId, {
+            pid: meta.pid,
+            sessionId: meta.sessionId,
+            shortId: meta.sessionId.slice(0, 8),
+            agent: meta.agent,
+            status: meta.status,
+            cwd: meta.cwd,
+            startedAt: meta.startedAt,
+            transcript: meta.transcript,
+            recap: parsed.recap,
+            messageCount: parsed.total,
+            tailCount: tail.length,
+            tail,
+            pendingMessages: (0, mailbox_1.pendingCount)(meta.sessionId),
+        });
+    }
+    return [...byId.values()].sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? ""));
+}
+/** Lightweight cross-product live-session list (no transcript parsing). */
 function listSessionRefs() {
+    const byId = new Map();
     let files;
     try {
         files = (0, node_fs_1.readdirSync)(SESS_DIR).filter((f) => f.endsWith(".json"));
     }
     catch {
-        return [];
+        files = [];
     }
-    const refs = [];
     for (const f of files) {
         try {
             const meta = JSON.parse((0, node_fs_1.readFileSync)((0, node_path_1.join)(SESS_DIR, f), "utf8"));
             const pid = Number(meta.pid);
             if (!pid || typeof meta.sessionId !== "string")
                 continue;
-            const cmd = processCommand(pid);
-            if (!cmd || !cmd.includes("claude"))
+            if (!liveClaudePid(pid))
                 continue;
-            refs.push({ pid, sessionId: meta.sessionId, cwd: meta.cwd ?? "" });
+            byId.set(meta.sessionId, {
+                pid,
+                sessionId: meta.sessionId,
+                agent: "claude",
+                cwd: meta.cwd ?? "",
+            });
         }
         catch {
             continue;
         }
     }
-    return refs;
-}
-function parentPid(pid) {
-    try {
-        const out = (0, node_child_process_1.execFileSync)("ps", ["-p", String(pid), "-o", "ppid="], {
-            encoding: "utf8",
-        }).trim();
-        const p = parseInt(out, 10);
-        return Number.isFinite(p) && p > 1 ? p : null;
+    for (const session of (0, registry_1.registeredSessions)()) {
+        if (byId.has(session.sessionId))
+            continue;
+        byId.set(session.sessionId, {
+            pid: session.pid,
+            sessionId: session.sessionId,
+            agent: session.agent,
+            cwd: session.cwd,
+        });
     }
-    catch {
-        return null;
-    }
+    return [...byId.values()];
 }
 /**
  * The session this process is running inside, found by walking up the process
@@ -392,13 +568,19 @@ function parentPid(pid) {
  * agent's shell to that agent. Null when run from a plain terminal.
  */
 function senderSession(refs) {
+    const envSid = process.env.CODEX_THREAD_ID || process.env.CLAUDE_SESSION_ID;
+    if (envSid) {
+        const exact = refs.find((ref) => ref.sessionId === envSid);
+        if (exact)
+            return exact;
+    }
     const byPid = new Map(refs.map((r) => [r.pid, r]));
     let pid = process.ppid;
     for (let depth = 0; pid && depth < 15; depth++) {
         const hit = byPid.get(pid);
         if (hit)
             return hit;
-        pid = parentPid(pid);
+        pid = (0, registry_1.parentPid)(pid);
     }
     return null;
 }
@@ -411,7 +593,7 @@ function parseTtl(s) {
 }
 function listRefsTo(stream, refs) {
     for (const r of refs) {
-        stream.write(`  ${r.sessionId.slice(0, 8)}  pid ${r.pid}  ${r.cwd}\n`);
+        stream.write(`  ${r.sessionId.slice(0, 8)}  ${r.agent}  pid ${r.pid}  ${r.cwd}\n`);
     }
 }
 function runSend(argv) {
@@ -486,7 +668,7 @@ function runInbox() {
     const refs = listSessionRefs();
     const me = senderSession(refs);
     if (!me) {
-        process.stderr.write("crew: not inside a Claude Code session — no inbox\n");
+        process.stderr.write("crew: not inside a known agent session — no inbox\n");
         process.exit(1);
     }
     const msgs = (0, mailbox_1.peekInbox)(me.sessionId);
@@ -508,7 +690,7 @@ function renderText(sessions, opts) {
     const lines = [];
     for (const s of sessions) {
         lines.push("\n════════════════════════════════════════════════════════════════════");
-        lines.push(`${EMOJI[s.status] ?? "⚫"}  ${s.shortId}   pid ${s.pid}   status: ${s.status}`);
+        lines.push(`${EMOJI[s.status] ?? "⚫"}  ${s.shortId}   ${s.agent}   pid ${s.pid}   status: ${s.status}`);
         const started = s.startedAt
             ? new Date(s.startedAt).toLocaleString()
             : "?";
@@ -571,12 +753,12 @@ function renderHookContext(sessions) {
     const MAX_SESSIONS = 8;
     const shown = sessions.slice(0, MAX_SESSIONS);
     const lines = [
-        `${sessions.length} other Claude Code session(s) running on this machine right now. ` +
+        `${sessions.length} other agent session(s) running on this machine right now. ` +
             `Consider them before starting overlapping work; run \`${cliCmd()}\` for the full view.`,
     ];
     for (const s of shown) {
         lines.push("");
-        lines.push(`• ${s.shortId} — ${s.status || "unknown"} — ${s.cwd}`);
+        lines.push(`• ${s.shortId} — ${s.agent} — ${s.status || "unknown"} — ${s.cwd}`);
         if (s.recap)
             lines.push(`  recap: ${trunc(s.recap, 300, false)}`);
         for (const e of s.tail) {
@@ -661,7 +843,13 @@ const HOOK_EVENT_NAMES = new Set([
     "PostToolUse",
     "Stop",
 ]);
-function emitHook(event, context) {
+function emitHook(agent, event, context) {
+    // Codex Stop uses a continuation reason rather than additionalContext. This
+    // makes pending mail model-visible before the session becomes idle.
+    if (agent === "codex" && event === "Stop") {
+        process.stdout.write(JSON.stringify({ decision: "block", reason: context }) + "\n");
+        return;
+    }
     process.stdout.write(JSON.stringify({
         hookSpecificOutput: { hookEventName: event, additionalContext: context },
     }) + "\n");
@@ -670,14 +858,15 @@ function runHook(opts) {
     // Never exit non-zero: exit 2 on UserPromptSubmit would block the prompt,
     // and on Stop it would force the agent to continue.
     try {
-        // Installed both ways (plugin + settings.json hook)? Defer to the
-        // settings-level hook so context is never injected twice. Only defers
-        // when the global `crew` actually resolves, so a stale settings entry
-        // can't silence both copies.
-        if (process.env.CLAUDE_PLUGIN_ROOT && onPath("crew") && (0, settings_1.hookInstalled)()) {
+        const input = readHookInput();
+        const agent = (0, registry_1.recordHookSession)(input);
+        // Installed both ways (plugin + user hook)? Defer to the global hook so
+        // context is never injected twice. Only defer when `crew` resolves.
+        if ((process.env.PLUGIN_ROOT || process.env.CLAUDE_PLUGIN_ROOT) &&
+            onPath("crew") &&
+            (0, settings_1.hookInstalled)(agent)) {
             return;
         }
-        const input = readHookInput();
         const event = HOOK_EVENT_NAMES.has(input.hook_event_name ?? "")
             ? input.hook_event_name
             : "SessionStart";
@@ -688,13 +877,13 @@ function runHook(opts) {
         // silence (zero tokens) when there's none.
         if (event === "PostToolUse" || event === "Stop") {
             if (messages.length > 0)
-                emitHook(event, renderMessages(messages));
+                emitHook(agent, event, renderMessages(messages));
             return;
         }
         if (!opts.tailSet)
             opts.tailN = 5;
         (0, mailbox_1.pruneInboxes)();
-        const sessions = collectSessions(opts).filter((s) => s.sessionId !== sid && s.pid !== process.ppid);
+        const sessions = collectSessions(opts).filter((s) => s.sessionId !== sid);
         const status = sessions.length > 0 ? renderHookContext(sessions) : "";
         if (!status && messages.length === 0)
             return; // nothing to inject, zero tokens spent
@@ -707,7 +896,7 @@ function runHook(opts) {
         }
         if (status)
             rememberEmit(sid, status);
-        emitHook(event, [renderMessages(messages), status].filter(Boolean).join("\n\n"));
+        emitHook(agent, event, [renderMessages(messages), status].filter(Boolean).join("\n\n"));
     }
     catch {
         // swallow everything; a broken hook must not break the session
@@ -715,26 +904,31 @@ function runHook(opts) {
 }
 // ---------- settings commands ----------
 function runSettingsCommand(mode) {
-    const path = (0, settings_1.settingsPath)();
-    const shown = (0, settings_1.tildify)(path);
-    try {
-        if (mode === "install-hook") {
-            const r = (0, settings_1.installHook)(path);
-            process.stdout.write(r === "installed"
-                ? "✓ crew wired into Claude Code — your sessions now see each other. Undo: crew uninstall-hook\n"
-                : "✓ already wired — nothing to change.\n");
+    const labels = { claude: "Claude Code", codex: "Codex" };
+    let failed = false;
+    for (const agent of ["claude", "codex"]) {
+        const shown = (0, settings_1.tildify)((0, settings_1.settingsPath)(agent));
+        try {
+            if (mode === "install-hook") {
+                const result = (0, settings_1.installHook)(agent);
+                process.stdout.write(result === "installed"
+                    ? `✓ crew wired into ${labels[agent]} (${shown}).\n`
+                    : `✓ ${labels[agent]} already wired — nothing to change.\n`);
+            }
+            else {
+                const result = (0, settings_1.uninstallHook)(agent);
+                process.stdout.write(result === "removed"
+                    ? `✓ crew hook removed from ${labels[agent]}.\n`
+                    : `crew: no hook found in ${shown} — nothing to remove.\n`);
+            }
         }
-        else {
-            const r = (0, settings_1.uninstallHook)(path);
-            process.stdout.write(r === "removed"
-                ? "✓ crew hook removed.\n"
-                : `crew: no hook found in ${shown} — nothing to remove.\n`);
+        catch (err) {
+            failed = true;
+            process.stderr.write(`crew: ${labels[agent]}: ${err.message}\n`);
         }
     }
-    catch (err) {
-        process.stderr.write(`crew: ${err.message}\n`);
-        process.exit(1);
-    }
+    if (failed)
+        process.exitCode = 1;
 }
 // ---------- main ----------
 function main() {
@@ -757,10 +951,6 @@ function main() {
         runHook(opts);
         return;
     }
-    if (!(0, node_fs_1.existsSync)(SESS_DIR)) {
-        process.stderr.write(`crew: no sessions dir at ${SESS_DIR}\n`);
-        process.exit(1);
-    }
     const sessions = collectSessions(opts);
     const out = opts.format === "json" ? renderJson(sessions, opts) : renderText(sessions, opts);
     process.stdout.write(out);
@@ -770,9 +960,13 @@ function main() {
     // --json output is consumed by agents.
     if (opts.format === "text" &&
         process.env.CREW_NO_HOOK !== "1" &&
-        !(0, settings_1.hookInstalled)()) {
-        process.stderr.write("\ncrew: context hook not installed — your Claude Code sessions can't see each other yet.\n" +
-            `crew: run \`crew install-hook\` to wire \`${settings_1.HOOK_COMMAND}\` into ${(0, settings_1.settingsPath)()}.\n`);
+        (!(0, settings_1.hookInstalled)("claude") || !(0, settings_1.hookInstalled)("codex"))) {
+        const missing = ["claude", "codex"]
+            .filter((agent) => !(0, settings_1.hookInstalled)(agent))
+            .map((agent) => (agent === "claude" ? "Claude Code" : "Codex"))
+            .join(" and ");
+        process.stderr.write(`\ncrew: context hook not installed for ${missing}.\n` +
+            `crew: run \`crew install-hook\` to wire \`${settings_1.HOOK_COMMAND}\` into both agents.\n`);
     }
 }
 main();
