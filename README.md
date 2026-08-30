@@ -84,6 +84,7 @@ Any session (or you, from a plain terminal) can drop a message straight into ano
 crew send b5e3 "settings.ts is mine for the next 20 min"   # target: shortId prefix, pid, or cwd substring
 crew send --all "deploying api to staging now"             # broadcast to every other session
 crew send fc22 "npm support replied, name is free" --ttl 2h  # expire undelivered mail (default 24h)
+crew send 4d3d "prod is broken, stop deploying" --kickstart  # force the target to act on it (-k)
 crew inbox                                                 # peek at your own pending mail
 ```
 
@@ -99,6 +100,22 @@ When it arrives depends on what the target is doing:
 
 An idle session can't be woken externally, so undelivered mail waits in `~/.crew/inbox/` until its TTL expires; the `crew` view shows a 📨 pending count for it in the meantime. Once delivered, a message becomes part of the target's context, like anything else it read. Each message is delivered exactly once, even when hook events race. In Codex, pending mail at `Stop` deliberately continues the turn once so the agent can act on it before becoming idle.
 
+**`--kickstart` (`-k`)** turns a message from passive context into a directive. Normally mail delivered as a session finishes its turn is injected as context the agent *may* act on; a kickstart message instead force-continues the agent (via the `Stop` hook's `decision: block`), so it keeps working and acts on the message rather than going idle — the same continuation Codex mail already does, made explicit and on demand for Claude too. It catches the target the moment it *would* stop; a session already sitting idle has no upcoming `Stop` to catch, so `crew send` warns you and the message waits like normal mail until the session next runs.
+
+### Waking a fully-idle agent
+
+A session sitting idle at its prompt can't be woken by a hook — its `Stop` already fired, and Claude Code exposes no API to inject a prompt into a running interactive session ([open feature request](https://github.com/anthropics/claude-code/issues/27441)). Writing bytes to its terminal doesn't help either: Claude's input uses bracketed-paste mode, so a piped carriage return is swallowed as a literal newline rather than submitting.
+
+The one mechanism that works is a terminal multiplexer, which owns the pty and can deliver a *standalone* Enter key event. If you run agents inside **tmux**, you can wake an idle one yourself:
+
+```sh
+tmux send-keys -t <target> -l -- "$(crew inbox)"   # or your own text
+sleep 0.4                                           # keep Enter a separate key event
+tmux send-keys -t <target> Enter                    # fires submit
+```
+
+(GNU `screen` has the equivalent `screen -S <sess> -X stuff`.) There's no clean, focus-free equivalent for VS Code integrated terminals or a bare terminal, so for those a kickstart message waits until the session next runs on its own.
+
 ## The CLI
 
 The same view, for humans:
@@ -111,6 +128,7 @@ crew --json --full    # NDJSON without tool input/output truncation
 crew --dir ~/work     # only sessions whose cwd is under ~/work
 crew --dir            # only sessions under the current directory
 crew send <t> "msg"   # message a session (t: shortId prefix, pid, cwd substring)
+crew send <t> "msg" -k  # kickstart: force the target to act on the message
 crew inbox            # your own pending messages
 crew --help
 ```
@@ -150,7 +168,7 @@ Tool input/output is truncated by default; pass `--full` for the complete conten
 - **`SessionStart`** — every new session (and every re-start after context compaction) opens knowing what the rest of the crew is doing.
 - **`UserPromptSubmit`** — the picture is refreshed before each of your messages, and queued mail is delivered with it.
 - **`PostToolUse`** — mail only: a busy agent receives messages after supported tool calls, typically within seconds of `crew send`.
-- **`Stop`** — mail only: an agent finishing its turn handles waiting messages instead of going idle.
+- **`Stop`** — mail only: an agent finishing its turn handles waiting messages instead of going idle. A `--kickstart` message force-continues the turn here (`decision: block`) so the agent acts on it rather than injecting it as passive context.
 
 The hook is careful about tokens and safety:
 

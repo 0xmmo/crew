@@ -1,5 +1,11 @@
 const assert = require("node:assert/strict");
-const { mkdtempSync, mkdirSync, readFileSync, writeFileSync } = require("node:fs");
+const {
+  mkdtempSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
@@ -7,6 +13,38 @@ const { test } = require("node:test");
 
 const root = resolve(__dirname, "..");
 const crew = join(root, "dist", "crew.js");
+
+function baseMsg(extra) {
+  return {
+    ts: new Date().toISOString(),
+    from: "sender-session-id",
+    fromShort: "sender01",
+    fromCwd: "/tmp/sender",
+    text: "coordinate first",
+    expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    ...extra,
+  };
+}
+
+function writeInbox(env, sid, msg) {
+  const dir = join(env.CREW_HOME, "inbox", sid);
+  mkdirSync(dir, { recursive: true });
+  const name = `${Date.now()}-${Math.random().toString(16).slice(2, 10)}.json`;
+  writeFileSync(join(dir, name), JSON.stringify(msg));
+}
+
+function stopHook(env, sid, event = "Stop") {
+  return run(
+    ["--hook"],
+    env,
+    JSON.stringify({
+      session_id: sid,
+      hook_event_name: event,
+      transcript_path: null,
+      cwd: root,
+    }),
+  );
+}
 
 function homes() {
   const root = mkdtempSync(join(tmpdir(), "crew-test-"));
@@ -156,5 +194,71 @@ test("Codex hooks register, parse, receive mail, and drain on Stop", async (t) =
   const after = JSON.parse(run(["--json"], h.env).stdout.trim());
   assert.equal(after.pendingMessages, 0);
   assert.equal(after.status, "idle");
+});
+
+test("kickstart force-continues on Stop; plain mail only injects context", () => {
+  const h = homes();
+  const sid = "claude-kickstart-session";
+
+  writeInbox(h.env, sid, baseMsg({ text: "plain hello" }));
+  const plain = stopHook(h.env, sid);
+  assert.equal(plain.status, 0, plain.stderr);
+  const plainOut = JSON.parse(plain.stdout.trim());
+  assert.equal(plainOut.decision, undefined);
+  assert.match(plainOut.hookSpecificOutput.additionalContext, /plain hello/);
+
+  writeInbox(h.env, sid, baseMsg({ text: "go fix the build", kickstart: true }));
+  const kick = stopHook(h.env, sid);
+  assert.equal(kick.status, 0, kick.stderr);
+  const kickOut = JSON.parse(kick.stdout.trim());
+  assert.equal(kickOut.decision, "block");
+  assert.match(kickOut.reason, /go fix the build/);
+  assert.match(kickOut.reason, /Act on it now/);
+
+  // Mid-turn (PostToolUse) the agent is already active, so kickstart mail is
+  // delivered as context, not a forced continuation.
+  writeInbox(h.env, sid, baseMsg({ text: "mid turn", kickstart: true }));
+  const mid = stopHook(h.env, sid, "PostToolUse");
+  assert.equal(mid.status, 0, mid.stderr);
+  const midOut = JSON.parse(mid.stdout.trim());
+  assert.equal(midOut.decision, undefined);
+  assert.match(midOut.hookSpecificOutput.additionalContext, /mid turn/);
+});
+
+test("send --kickstart flags the message and warns when the target is idle", async (t) => {
+  const h = homes();
+  const sleeper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1e9)"], {
+    stdio: "ignore",
+  });
+  t.after(() => sleeper.kill());
+  const sid = "claude-idle-target-session";
+  mkdirSync(join(h.env.CREW_HOME, "sessions"), { recursive: true });
+  writeFileSync(
+    join(h.env.CREW_HOME, "sessions", `${sid}.json`),
+    JSON.stringify({
+      pid: sleeper.pid,
+      sessionId: sid,
+      agent: "claude",
+      status: "idle",
+      cwd: "/tmp/work",
+      startedAt: new Date().toISOString(),
+      lastSeen: new Date().toISOString(),
+      transcript: null,
+    }),
+  );
+
+  const sent = run(
+    ["send", sid.slice(0, 8), "deploy is unblocked, go", "--kickstart"],
+    h.env,
+  );
+  assert.equal(sent.status, 0, sent.stderr);
+  assert.match(sent.stdout, /kickstart queued/);
+  assert.match(sent.stderr, /idle/);
+
+  const dir = join(h.env.CREW_HOME, "inbox", sid);
+  const file = readdirSync(dir).find((f) => f.endsWith(".json"));
+  const msg = JSON.parse(readFileSync(join(dir, file), "utf8"));
+  assert.equal(msg.kickstart, true);
+  assert.equal(msg.text, "deploy is unblocked, go");
 });
 

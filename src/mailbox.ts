@@ -38,6 +38,11 @@ export interface Message {
   fromCwd: string;
   text: string;
   expiresAt?: string;
+  // When set, the target's Stop hook force-continues (decision: block) instead
+  // of passively injecting context, so an agent about to go idle acts on the
+  // message as a directive. A truly-idle agent has no upcoming Stop to catch,
+  // so this is best-effort — see runSend's idle warning.
+  kickstart?: boolean;
 }
 
 function expired(m: Message): boolean {

@@ -16,6 +16,7 @@
  *   crew install-hook    wire `crew --hook` into Claude Code and Codex
  *   crew uninstall-hook  remove it
  *   crew send <t> "msg"  message another session (delivered via its hook)
+ *   crew send -k <t> ... kickstart: force the target to act on the message
  *   crew inbox           peek at this session's pending messages
  *   crew                 human view, last 50 transcript entries per session
  *   crew 10              human view, last 10 entries
@@ -134,6 +135,8 @@ function printHelp() {
         '  crew send <t> "msg"   t = shortId prefix, pid, or cwd substring',
         '  crew send --all "msg" broadcast to every other live session',
         "  crew send --ttl 30m   expire undelivered mail (default 24h)",
+        "  crew send --kickstart force the target to act on the message (-k): its",
+        "                        Stop hook continues it instead of injecting context",
         "  crew inbox            peek at this session's pending messages",
         "",
         "CLI:",
@@ -544,6 +547,7 @@ function listSessionRefs() {
                 sessionId: meta.sessionId,
                 agent: "claude",
                 cwd: meta.cwd ?? "",
+                status: typeof meta.status === "string" ? meta.status : "",
             });
         }
         catch {
@@ -558,6 +562,7 @@ function listSessionRefs() {
             sessionId: session.sessionId,
             agent: session.agent,
             cwd: session.cwd,
+            status: session.status,
         });
     }
     return [...byId.values()];
@@ -598,12 +603,15 @@ function listRefsTo(stream, refs) {
 }
 function runSend(argv) {
     let all = false;
+    let kickstart = false;
     let ttlMs = mailbox_1.DEFAULT_TTL_MS;
     const rest = [];
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         if (a === "--all")
             all = true;
+        else if (a === "--kickstart" || a === "-k")
+            kickstart = true;
         else if (a === "--ttl") {
             const parsed = parseTtl(argv[++i] ?? "");
             if (parsed === null) {
@@ -618,7 +626,7 @@ function runSend(argv) {
     const target = all ? null : rest.shift();
     const text = rest.join(" ").trim();
     if ((!all && !target) || !text) {
-        process.stderr.write('usage: crew send <shortId|pid|cwd-substring> "message" [--ttl 30m]\n' +
+        process.stderr.write('usage: crew send <shortId|pid|cwd-substring> "message" [--ttl 30m] [--kickstart]\n' +
             '       crew send --all "message"\n');
         process.exit(2);
     }
@@ -658,11 +666,25 @@ function runSend(argv) {
         fromCwd: me?.cwd ?? process.cwd(),
         text,
         expiresAt: new Date(now + ttlMs).toISOString(),
+        ...(kickstart ? { kickstart: true } : {}),
     };
     for (const r of targets)
         (0, mailbox_1.sendMessage)(r.sessionId, msg);
     const names = targets.map((r) => r.sessionId.slice(0, 8)).join(", ");
-    process.stdout.write(`crew: queued for ${names} — delivers on their next tool call, turn end, or prompt.\n`);
+    if (kickstart) {
+        // A kickstart force-continues the target when its Stop hook next fires. A
+        // busy agent hits that the moment its current turn ends; an already-idle
+        // agent has no upcoming Stop, so warn that it can't be woken from outside.
+        const idle = targets.filter((r) => r.status === "idle");
+        for (const r of idle) {
+            process.stderr.write(`⚠️  crew: ${r.sessionId.slice(0, 8)} is idle — kickstart can't wake a stopped session ` +
+                `from outside. It'll act on this the instant it next runs; queued as normal mail until then.\n`);
+        }
+        process.stdout.write(`crew: kickstart queued for ${names} — force-continues each onto this message when its Stop hook next fires.\n`);
+    }
+    else {
+        process.stdout.write(`crew: queued for ${names} — delivers on their next tool call, turn end, or prompt.\n`);
+    }
 }
 function runInbox() {
     const refs = listSessionRefs();
@@ -797,8 +819,11 @@ function ago(ts) {
         return `${h}h ago`;
     return `${Math.round(h / 24)}d ago`;
 }
-function renderMessages(messages) {
+function renderMessages(messages, kickstart = false) {
     const lines = [];
+    if (kickstart) {
+        lines.push("A crew message asked you to keep working rather than go idle. Act on it now:");
+    }
     for (const m of messages) {
         const when = ago(m.ts);
         lines.push(`📨 Message from ${m.fromShort} (${m.fromCwd}${when ? `, sent ${when}` : ""}):`);
@@ -843,10 +868,12 @@ const HOOK_EVENT_NAMES = new Set([
     "PostToolUse",
     "Stop",
 ]);
-function emitHook(agent, event, context) {
-    // Codex Stop uses a continuation reason rather than additionalContext. This
-    // makes pending mail model-visible before the session becomes idle.
-    if (agent === "codex" && event === "Stop") {
+function emitHook(agent, event, context, forceContinue = false) {
+    // Codex Stop always uses a continuation reason rather than additionalContext,
+    // which makes pending mail model-visible before the session becomes idle. A
+    // kickstart message forces the same continuation on Claude, turning the
+    // message into a directive the agent acts on instead of stopping.
+    if (event === "Stop" && (agent === "codex" || forceContinue)) {
         process.stdout.write(JSON.stringify({ decision: "block", reason: context }) + "\n");
         return;
     }
@@ -876,8 +903,13 @@ function runHook(opts) {
         // deliver mail: one inbox readdir, no session/transcript scan, and total
         // silence (zero tokens) when there's none.
         if (event === "PostToolUse" || event === "Stop") {
-            if (messages.length > 0)
-                emitHook(agent, event, renderMessages(messages));
+            if (messages.length > 0) {
+                // Kickstart only changes the Stop transition: force-continue instead of
+                // letting the agent go idle. PostToolUse is mid-turn, so the agent is
+                // already active and plain context delivery is enough.
+                const kickstart = event === "Stop" && messages.some((m) => m.kickstart);
+                emitHook(agent, event, renderMessages(messages, kickstart), kickstart);
+            }
             return;
         }
         if (!opts.tailSet)
