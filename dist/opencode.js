@@ -131,16 +131,22 @@ import { existsSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
 
-const NODE = ${JSON.stringify(nodeBin)}
-const CREW = ${JSON.stringify(crewScript)}
+// Baked at install time, but neither path is guaranteed to survive: a node
+// upgrade removes a version-pinned bin, and the crew script moves if it was
+// installed from a checkout. Both fall back to PATH lookups.
+const BAKED_NODE = ${JSON.stringify(nodeBin)}
+const BAKED_CREW = ${JSON.stringify(crewScript)}
+const NODE = existsSync(BAKED_NODE) ? BAKED_NODE : "node"
+const CREW = existsSync(BAKED_CREW) ? BAKED_CREW : null
 const CREW_HOME = process.env.CREW_HOME || join(homedir(), ".crew")
 const POLL_MS = 15000
 
 function crewHook(event, sessionID, cwd) {
   return new Promise((resolve) => {
     try {
-      if (!existsSync(CREW)) return resolve(null)
-      const child = spawn(NODE, [CREW, "--hook"], {
+      const cmd = CREW ? NODE : "crew"
+      const args = CREW ? [CREW, "--hook"] : ["--hook"]
+      const child = spawn(cmd, args, {
         env: { ...process.env, CREW_AGENT: "opencode", CREW_PID: String(process.pid) },
         stdio: ["pipe", "pipe", "ignore"],
       })
