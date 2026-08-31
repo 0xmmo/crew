@@ -1,13 +1,14 @@
 "use strict";
 /**
- * settings.ts — wire crew's context hook into Claude Code and Codex.
+ * settings.ts — wire crew's context hook into Claude Code, Codex, and opencode.
  *
- * Both products use the same hook event/config shape. We merge crew into each
- * user hook file without touching unrelated settings and never write over a
- * file we cannot parse.
+ * Claude and Codex use the same hook event/config shape: crew is merged into
+ * each user hook file without touching unrelated settings, and never written
+ * over a file we cannot parse. opencode has no hook file; its "install" is a
+ * generated plugin dropped into the global plugins directory (see opencode.ts).
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.HOOK_EVENTS = exports.HOOK_COMMAND = void 0;
+exports.HOOK_EVENTS = exports.HOOK_COMMAND = exports.AGENT_LABELS = exports.AGENTS = void 0;
 exports.tildify = tildify;
 exports.settingsPath = settingsPath;
 exports.hookInstalled = hookInstalled;
@@ -16,6 +17,13 @@ exports.uninstallHook = uninstallHook;
 const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
 const node_os_1 = require("node:os");
+const opencode_1 = require("./opencode");
+exports.AGENTS = ["claude", "codex", "opencode"];
+exports.AGENT_LABELS = {
+    claude: "Claude Code",
+    codex: "Codex",
+    opencode: "opencode",
+};
 exports.HOOK_COMMAND = "crew --hook";
 exports.HOOK_EVENTS = [
     "SessionStart",
@@ -29,6 +37,8 @@ function tildify(path) {
     return path.startsWith(home) ? "~" + path.slice(home.length) : path;
 }
 function settingsPath(agent = "claude") {
+    if (agent === "opencode")
+        return (0, opencode_1.opencodePluginPath)();
     if (agent === "codex") {
         const dir = process.env.CODEX_HOME || (0, node_path_1.join)((0, node_os_1.homedir)(), ".codex");
         return (0, node_path_1.join)(dir, "hooks.json");
@@ -56,8 +66,23 @@ function readSettings(path) {
     }
     return parsed;
 }
+/** The generated opencode plugin, with crew's runtime paths baked in. */
+function renderedOpencodePlugin() {
+    return (0, opencode_1.opencodePluginSource)(process.execPath, (0, node_path_1.join)(__dirname, "crew.js"));
+}
+/** True if the plugin file at path is one crew generated (safe to replace). */
+function ownsOpencodePlugin(path) {
+    try {
+        return (0, node_fs_1.readFileSync)(path, "utf8").includes(opencode_1.OPENCODE_PLUGIN_MARKER);
+    }
+    catch {
+        return false;
+    }
+}
 /** True if crew is wired into any supported event for an agent. Never throws. */
 function hookInstalled(agent = "claude") {
+    if (agent === "opencode")
+        return ownsOpencodePlugin((0, opencode_1.opencodePluginPath)());
     try {
         const hooks = readSettings(settingsPath(agent)).hooks;
         if (!hooks || typeof hooks !== "object")
@@ -69,6 +94,20 @@ function hookInstalled(agent = "claude") {
     }
 }
 function installHook(agent = "claude") {
+    if (agent === "opencode") {
+        const path = (0, opencode_1.opencodePluginPath)();
+        const source = renderedOpencodePlugin();
+        if ((0, node_fs_1.existsSync)(path)) {
+            if (!ownsOpencodePlugin(path)) {
+                throw new Error(`${path} exists and isn't crew's — refusing to overwrite`);
+            }
+            if ((0, node_fs_1.readFileSync)(path, "utf8") === source)
+                return "already-installed";
+        }
+        (0, node_fs_1.mkdirSync)((0, node_path_1.dirname)(path), { recursive: true });
+        (0, node_fs_1.writeFileSync)(path, source);
+        return "installed";
+    }
     const path = settingsPath(agent);
     const settings = readSettings(path);
     const hooks = (settings.hooks ??= {});
@@ -93,6 +132,13 @@ function installHook(agent = "claude") {
     return "installed";
 }
 function uninstallHook(agent = "claude") {
+    if (agent === "opencode") {
+        const path = (0, opencode_1.opencodePluginPath)();
+        if (!ownsOpencodePlugin(path))
+            return "not-installed";
+        (0, node_fs_1.unlinkSync)(path);
+        return "removed";
+    }
     const path = settingsPath(agent);
     if (!(0, node_fs_1.existsSync)(path))
         return "not-installed";

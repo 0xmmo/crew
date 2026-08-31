@@ -1,11 +1,11 @@
 /**
- * npm postinstall — auto-wire `crew --hook` into Claude Code and Codex.
+ * npm postinstall — auto-wire crew into Claude Code, Codex, and opencode.
  *
  * Runs only on global installs (`npm i -g`). Set CREW_NO_HOOK=1 to opt out.
  * Never fails the install: errors are reported and swallowed.
  */
 
-import { Agent, installHook, settingsPath, tildify } from "./settings";
+import { AGENTS, AGENT_LABELS, installHook, settingsPath, tildify } from "./settings";
 
 function main(): void {
   if (process.env.CREW_NO_HOOK === "1") return;
@@ -14,12 +14,13 @@ function main(): void {
     process.env.npm_config_location === "global";
   if (!isGlobal) return; // local/dev install: don't touch user settings
 
-  const labels: Record<Agent, string> = { claude: "Claude Code", codex: "Codex" };
-  for (const agent of ["claude", "codex"] as const) {
+  for (const agent of AGENTS) {
     const shown = tildify(settingsPath(agent));
     try {
       if (installHook(agent) === "installed") {
-        process.stdout.write(`✓ crew wired into ${labels[agent]} (${shown}).\n`);
+        process.stdout.write(
+          `✓ crew wired into ${AGENT_LABELS[agent]} (${shown}).\n`,
+        );
       }
     } catch (err) {
       process.stdout.write(

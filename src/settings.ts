@@ -1,16 +1,36 @@
 /**
- * settings.ts — wire crew's context hook into Claude Code and Codex.
+ * settings.ts — wire crew's context hook into Claude Code, Codex, and opencode.
  *
- * Both products use the same hook event/config shape. We merge crew into each
- * user hook file without touching unrelated settings and never write over a
- * file we cannot parse.
+ * Claude and Codex use the same hook event/config shape: crew is merged into
+ * each user hook file without touching unrelated settings, and never written
+ * over a file we cannot parse. opencode has no hook file; its "install" is a
+ * generated plugin dropped into the global plugins directory (see opencode.ts).
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
+import {
+  OPENCODE_PLUGIN_MARKER,
+  opencodePluginPath,
+  opencodePluginSource,
+} from "./opencode";
 
-export type Agent = "claude" | "codex";
+export type Agent = "claude" | "codex" | "opencode";
+
+export const AGENTS = ["claude", "codex", "opencode"] as const;
+
+export const AGENT_LABELS: Record<Agent, string> = {
+  claude: "Claude Code",
+  codex: "Codex",
+  opencode: "opencode",
+};
 
 export const HOOK_COMMAND = "crew --hook";
 
@@ -28,6 +48,7 @@ export function tildify(path: string): string {
 }
 
 export function settingsPath(agent: Agent = "claude"): string {
+  if (agent === "opencode") return opencodePluginPath();
   if (agent === "codex") {
     const dir = process.env.CODEX_HOME || join(homedir(), ".codex");
     return join(dir, "hooks.json");
@@ -70,8 +91,23 @@ function readSettings(path: string): Record<string, any> {
   return parsed;
 }
 
+/** The generated opencode plugin, with crew's runtime paths baked in. */
+function renderedOpencodePlugin(): string {
+  return opencodePluginSource(process.execPath, join(__dirname, "crew.js"));
+}
+
+/** True if the plugin file at path is one crew generated (safe to replace). */
+function ownsOpencodePlugin(path: string): boolean {
+  try {
+    return readFileSync(path, "utf8").includes(OPENCODE_PLUGIN_MARKER);
+  } catch {
+    return false;
+  }
+}
+
 /** True if crew is wired into any supported event for an agent. Never throws. */
 export function hookInstalled(agent: Agent = "claude"): boolean {
+  if (agent === "opencode") return ownsOpencodePlugin(opencodePluginPath());
   try {
     const hooks = readSettings(settingsPath(agent)).hooks;
     if (!hooks || typeof hooks !== "object") return false;
@@ -86,6 +122,19 @@ export function hookInstalled(agent: Agent = "claude"): boolean {
 export type InstallResult = "installed" | "already-installed";
 
 export function installHook(agent: Agent = "claude"): InstallResult {
+  if (agent === "opencode") {
+    const path = opencodePluginPath();
+    const source = renderedOpencodePlugin();
+    if (existsSync(path)) {
+      if (!ownsOpencodePlugin(path)) {
+        throw new Error(`${path} exists and isn't crew's — refusing to overwrite`);
+      }
+      if (readFileSync(path, "utf8") === source) return "already-installed";
+    }
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, source);
+    return "installed";
+  }
   const path = settingsPath(agent);
   const settings = readSettings(path);
   const hooks = (settings.hooks ??= {});
@@ -111,6 +160,12 @@ export function installHook(agent: Agent = "claude"): InstallResult {
 export type UninstallResult = "removed" | "not-installed";
 
 export function uninstallHook(agent: Agent = "claude"): UninstallResult {
+  if (agent === "opencode") {
+    const path = opencodePluginPath();
+    if (!ownsOpencodePlugin(path)) return "not-installed";
+    unlinkSync(path);
+    return "removed";
+  }
   const path = settingsPath(agent);
   if (!existsSync(path)) return "not-installed";
   const settings = readSettings(path);

@@ -1,18 +1,19 @@
 #!/usr/bin/env node
 /**
- * crew — shared context for Claude Code and Codex agents.
+ * crew — shared context for Claude Code, Codex, and opencode agents.
  *
  * First and foremost an agent hook: `crew --hook` reads the hook event on
  * stdin and emits what your other running sessions are doing (status, recap,
  * transcript tail) as additionalContext, so every session automatically sees
  * the rest of the crew. Also a CLI for watching the same thing yourself.
  *
- * Claude sessions are discovered from Claude's live PID registry. Claude and
- * Codex hooks also maintain a tiny product-neutral live registry, which lets
- * sessions from both products share one view and mailbox.
+ * Claude sessions are discovered from Claude's live PID registry. All hooks
+ * (opencode's arrive via its generated crew plugin, see opencode.ts) also
+ * maintain a tiny product-neutral live registry, which lets sessions from
+ * every product share one view and mailbox.
  *
  *   crew --hook          hook mode: emit other sessions as additionalContext JSON
- *   crew install-hook    wire `crew --hook` into Claude Code and Codex
+ *   crew install-hook    wire crew into Claude Code, Codex, and opencode
  *   crew uninstall-hook  remove it
  *   crew send <t> "msg"  message another session (delivered via its hook)
  *   crew send -k <t> ... kickstart: force the target to act on the message
@@ -36,6 +37,8 @@ import { join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import {
+  AGENTS,
+  AGENT_LABELS,
   Agent,
   HOOK_COMMAND,
   hookInstalled,
@@ -60,7 +63,10 @@ import {
   processExists,
   recordHookSession,
   registeredSessions,
+  removeSession,
 } from "./registry";
+import { Entry, Parsed, clean } from "./transcript";
+import { parseOpencodeTranscript } from "./opencode";
 
 const CLAUDE_HOME = process.env.CLAUDE_HOME || join(homedir(), ".claude");
 const SESS_DIR = join(CLAUDE_HOME, "sessions");
@@ -97,17 +103,6 @@ function cliCmd(): string {
 }
 
 // ---------- types ----------
-
-type Kind = "text" | "tool_use" | "tool_result";
-
-interface Entry {
-  ts: string | null;
-  role: string;
-  kind: Kind;
-  text?: string; // text / tool_result
-  name?: string; // tool_use
-  summary?: string; // tool_use raw input summary
-}
 
 interface Session {
   pid: number;
@@ -190,13 +185,14 @@ function underDir(cwd: string, dir: string | null): boolean {
 function printHelp(): void {
   process.stdout.write(
     [
-      "crew — shared context and messaging for Claude Code and Codex agents",
+      "crew — shared context and messaging for Claude Code, Codex, and opencode agents",
       "",
       "Hook (auto-injects other sessions into agent context):",
       "  crew --hook [N]       read a hook event on stdin, emit other sessions as",
       "                        additionalContext JSON (default N=5 tail entries)",
-      "  crew install-hook     wire `crew --hook` into Claude Code and Codex",
-      "  crew uninstall-hook   remove it from both",
+      "  crew install-hook     wire crew into Claude Code + Codex (hooks) and",
+      "                        opencode (a generated plugin)",
+      "  crew uninstall-hook   remove it from all three",
       "",
       "Messaging (delivered into the target agent's context via the hook):",
       '  crew send <t> "msg"   t = shortId prefix, pid, or cwd substring',
@@ -216,6 +212,7 @@ function printHelp(): void {
       "Env:",
       "  CLAUDE_HOME           override ~/.claude",
       "  CODEX_HOME            override ~/.codex",
+      "  XDG_CONFIG_HOME/XDG_DATA_HOME  override opencode's plugin/db locations",
       "  CREW_HOME             override shared state at ~/.crew",
       "  CREW_NO_HOOK=1        skip hook auto-install on `npm i -g`",
       "",
@@ -224,17 +221,6 @@ function printHelp(): void {
 }
 
 // ---------- helpers ----------
-
-const STRIP: RegExp[] = [
-  /<system-reminder>[\s\S]*?<\/system-reminder>/g,
-  /<command-[^>]*>[\s\S]*?<\/command-[^>]*>/g,
-  /<local-command-[^>]*>[\s\S]*?<\/local-command-[^>]*>/g,
-];
-
-function clean(s: string): string {
-  for (const r of STRIP) s = s.replace(r, "");
-  return s.trim();
-}
 
 function trunc(s: string, n: number, full: boolean): string {
   if (full) return s;
@@ -269,12 +255,6 @@ function findTranscript(cwd: string, sid: string): string | null {
     if (existsSync(p)) return p;
   }
   return null;
-}
-
-interface Parsed {
-  recap: string | null;
-  total: number;
-  entries: Entry[];
 }
 
 /** Parse a Claude transcript jsonl into the recap and ordered entries. */
@@ -494,7 +474,8 @@ function parseCodexTranscript(path: string | null): Parsed {
   return out;
 }
 
-function parseTranscript(agent: Agent, path: string | null): Parsed {
+function parseTranscript(agent: Agent, path: string | null, sessionId = ""): Parsed {
+  if (agent === "opencode") return parseOpencodeTranscript(sessionId);
   return agent === "codex"
     ? parseCodexTranscript(path)
     : parseClaudeTranscript(path);
@@ -564,7 +545,7 @@ function collectSessions(opts: Opts): Session[] {
   }
   for (const meta of registeredSessions()) {
     if (byId.has(meta.sessionId) || !underDir(meta.cwd, opts.dir)) continue;
-    const parsed = parseTranscript(meta.agent, meta.transcript);
+    const parsed = parseTranscript(meta.agent, meta.transcript, meta.sessionId);
     const tail = parsed.entries.slice(-opts.tailN);
     byId.set(meta.sessionId, {
       pid: meta.pid,
@@ -642,7 +623,10 @@ function listSessionRefs(): SessionRef[] {
  * agent's shell to that agent. Null when run from a plain terminal.
  */
 function senderSession(refs: SessionRef[]): SessionRef | null {
-  const envSid = process.env.CODEX_THREAD_ID || process.env.CLAUDE_SESSION_ID;
+  const envSid =
+    process.env.CREW_SESSION_ID || // set by the opencode plugin's shell.env
+    process.env.CODEX_THREAD_ID ||
+    process.env.CLAUDE_SESSION_ID;
   if (envSid) {
     const exact = refs.find((ref) => ref.sessionId === envSid);
     if (exact) return exact;
@@ -743,14 +727,20 @@ function runSend(argv: string[]): void {
   const names = targets.map((r) => r.sessionId.slice(0, 8)).join(", ");
   if (kickstart) {
     // A kickstart force-continues the target when its Stop hook next fires. A
-    // busy agent hits that the moment its current turn ends; an already-idle
-    // agent has no upcoming Stop, so warn that it can't be woken from outside.
-    const idle = targets.filter((r) => r.status === "idle");
-    for (const r of idle) {
-      process.stderr.write(
-        `⚠️  crew: ${r.sessionId.slice(0, 8)} is idle — kickstart can't wake a stopped session ` +
-          `from outside. It'll act on this the instant it next runs; queued as normal mail until then.\n`,
-      );
+    // busy agent hits that the moment its current turn ends. An already-idle
+    // agent has no upcoming Stop — except opencode, whose crew plugin polls
+    // the inbox and can wake a stopped session from inside the process.
+    for (const r of targets.filter((t) => t.status === "idle")) {
+      if (r.agent === "opencode") {
+        process.stdout.write(
+          `crew: ${r.sessionId.slice(0, 8)} is idle — its crew plugin will wake it within ~15s.\n`,
+        );
+      } else {
+        process.stderr.write(
+          `⚠️  crew: ${r.sessionId.slice(0, 8)} is idle — kickstart can't wake a stopped session ` +
+            `from outside. It'll act on this the instant it next runs; queued as normal mail until then.\n`,
+        );
+      }
     }
     process.stdout.write(
       `crew: kickstart queued for ${names} — force-continues each onto this message when its Stop hook next fires.\n`,
@@ -963,6 +953,7 @@ const HOOK_EVENT_NAMES = new Set([
   "UserPromptSubmit",
   "PostToolUse",
   "Stop",
+  "SessionEnd",
 ]);
 
 function emitHook(
@@ -1007,6 +998,21 @@ function runHook(opts: Opts): void {
       ? (input.hook_event_name as string)
       : "SessionStart";
     const sid = typeof input.session_id === "string" ? input.session_id : "";
+    if (event === "SessionEnd") {
+      // The session is gone (opencode reports deletions); nothing to emit.
+      removeSession(sid);
+      return;
+    }
+    // An idle opencode session can only receive mail by being woken (the
+    // plugin prompts it), which only kickstart mail justifies — plain mail
+    // stays queued for its next turn instead of being drained into the void.
+    if (
+      agent === "opencode" &&
+      event === "Stop" &&
+      !peekInbox(sid).some((m) => m.kickstart)
+    ) {
+      return;
+    }
     const messages = sid ? drainInbox(sid) : [];
     // Mid-turn events fire on every tool call machine-wide, so they only
     // deliver mail: one inbox readdir, no session/transcript scan, and total
@@ -1049,29 +1055,30 @@ function runHook(opts: Opts): void {
 // ---------- settings commands ----------
 
 function runSettingsCommand(mode: "install-hook" | "uninstall-hook"): void {
-  const labels: Record<Agent, string> = { claude: "Claude Code", codex: "Codex" };
   let failed = false;
-  for (const agent of ["claude", "codex"] as const) {
+  for (const agent of AGENTS) {
     const shown = tildify(settingsPath(agent));
     try {
       if (mode === "install-hook") {
         const result = installHook(agent);
         process.stdout.write(
           result === "installed"
-            ? `✓ crew wired into ${labels[agent]} (${shown}).\n`
-            : `✓ ${labels[agent]} already wired — nothing to change.\n`,
+            ? `✓ crew wired into ${AGENT_LABELS[agent]} (${shown}).\n`
+            : `✓ ${AGENT_LABELS[agent]} already wired — nothing to change.\n`,
         );
       } else {
         const result = uninstallHook(agent);
         process.stdout.write(
           result === "removed"
-            ? `✓ crew hook removed from ${labels[agent]}.\n`
+            ? `✓ crew hook removed from ${AGENT_LABELS[agent]}.\n`
             : `crew: no hook found in ${shown} — nothing to remove.\n`,
         );
       }
     } catch (err) {
       failed = true;
-      process.stderr.write(`crew: ${labels[agent]}: ${(err as Error).message}\n`);
+      process.stderr.write(
+        `crew: ${AGENT_LABELS[agent]}: ${(err as Error).message}\n`,
+      );
     }
   }
   if (failed) process.exitCode = 1;
@@ -1107,19 +1114,16 @@ function main(): void {
   // output (and ignore-scripts blocks it entirely), so the human view is the one
   // reliable place to tell people the hook isn't wired yet. Text mode only —
   // --json output is consumed by agents.
-  if (
-    opts.format === "text" &&
-    process.env.CREW_NO_HOOK !== "1" &&
-    (!hookInstalled("claude") || !hookInstalled("codex"))
-  ) {
-    const missing = (["claude", "codex"] as const)
-      .filter((agent) => !hookInstalled(agent))
-      .map((agent) => (agent === "claude" ? "Claude Code" : "Codex"))
-      .join(" and ");
-    process.stderr.write(
-      `\ncrew: context hook not installed for ${missing}.\n` +
-        `crew: run \`crew install-hook\` to wire \`${HOOK_COMMAND}\` into both agents.\n`,
+  if (opts.format === "text" && process.env.CREW_NO_HOOK !== "1") {
+    const missing = AGENTS.filter((agent) => !hookInstalled(agent)).map(
+      (agent) => AGENT_LABELS[agent],
     );
+    if (missing.length > 0) {
+      process.stderr.write(
+        `\ncrew: context hook not installed for ${missing.join(" and ")}.\n` +
+          `crew: run \`crew install-hook\` to wire \`${HOOK_COMMAND}\` into every agent.\n`,
+      );
+    }
   }
 }
 

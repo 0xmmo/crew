@@ -13,6 +13,7 @@ exports.parentPid = parentPid;
 exports.processExists = processExists;
 exports.hookAgent = hookAgent;
 exports.recordHookSession = recordHookSession;
+exports.removeSession = removeSession;
 exports.registeredSessions = registeredSessions;
 const node_fs_1 = require("node:fs");
 const node_child_process_1 = require("node:child_process");
@@ -56,11 +57,28 @@ function processExists(pid) {
     }
 }
 function agentForCommand(command) {
+    if (/(^|[\s/])opencode(?:\s|$)/i.test(command))
+        return "opencode";
     if (/(^|[\s/])codex(?:\s|$)|Codex\.app\//i.test(command))
         return "codex";
     if (/(^|[\s/])claude(?:\s|$)|Claude\.app\//i.test(command))
         return "claude";
     return null;
+}
+function isAgent(value) {
+    return value === "claude" || value === "codex" || value === "opencode";
+}
+/**
+ * crew's own adapters (the opencode plugin) identify themselves via env when
+ * spawning `crew --hook`, which beats process-tree guessing and still works
+ * where `ps` is blocked.
+ */
+function envAgent() {
+    const agent = process.env.CREW_AGENT;
+    const pid = Number(process.env.CREW_PID);
+    if (!isAgent(agent) || !Number.isFinite(pid) || pid <= 0)
+        return null;
+    return { pid, agent };
 }
 function agentAncestor() {
     let pid = process.ppid;
@@ -74,6 +92,9 @@ function agentAncestor() {
 }
 /** Infer the product even if process inspection is blocked. */
 function hookAgent(input, ancestorAgent) {
+    const declared = envAgent();
+    if (declared)
+        return declared.agent;
     const transcript = input.transcript_path ?? "";
     if ((process.env.CODEX_THREAD_ID &&
         process.env.CODEX_THREAD_ID === input.session_id) ||
@@ -94,7 +115,7 @@ function readRegistered(path) {
         const value = JSON.parse((0, node_fs_1.readFileSync)(path, "utf8"));
         if (!value ||
             typeof value.sessionId !== "string" ||
-            (value.agent !== "claude" && value.agent !== "codex") ||
+            !isAgent(value.agent) ||
             !Number.isFinite(value.pid)) {
             return null;
         }
@@ -106,7 +127,7 @@ function readRegistered(path) {
 }
 /** Refresh the current top-level hook session and return its product. */
 function recordHookSession(input) {
-    const ancestor = agentAncestor();
+    const ancestor = envAgent() ?? agentAncestor();
     const inferred = hookAgent(input, ancestor?.agent);
     const sid = typeof input.session_id === "string" ? input.session_id : "";
     if (!sid)
@@ -143,6 +164,17 @@ function recordHookSession(input) {
         // Registration is best-effort; hooks must never block an agent.
     }
     return agent;
+}
+/** Drop a session's registry record (its product reported the session ended). */
+function removeSession(sid) {
+    if (!sid)
+        return;
+    try {
+        (0, node_fs_1.unlinkSync)(registryPath(sid));
+    }
+    catch {
+        // already gone or never registered
+    }
 }
 /** List live hook-registered sessions and prune dead/stale records. */
 function registeredSessions() {

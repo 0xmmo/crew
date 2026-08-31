@@ -2,7 +2,7 @@
 
 # crew
 
-**Let Claude Code and Codex agents talk to each other.**
+**Let Claude Code, Codex, and opencode agents talk to each other.**
 
 <sub>Ship features in parallel, no branches, no worktrees. Hand off work between sessions,<br>steer around each other's in-flight edits, announce deploys to every running agent.</sub>
 
@@ -19,14 +19,14 @@
 
 <br>
 
-crew auto-injects what your other running [Claude Code](https://claude.com/claude-code) and [Codex](https://developers.openai.com/codex/) sessions are doing (status, recap, and a tail of each transcript) into every session's context. Claude and Codex share one crew, so either can see and message the other. Agents steer around in-flight work while parallel sessions operate from one checkout instead of needing a worktree each. There's also a CLI for watching all of it yourself.
+crew auto-injects what your other running [Claude Code](https://claude.com/claude-code), [Codex](https://developers.openai.com/codex/), and [opencode](https://opencode.ai) sessions are doing (status, recap, and a tail of each transcript) into every session's context. All three products share one crew, so any of them can see and message the others. Agents steer around in-flight work while parallel sessions operate from one checkout instead of needing a worktree each. There's also a CLI for watching all of it yourself.
 
 *Just like autonomous cars don't need stoplights, agents don't need worktrees.*
 
 - **Shared context, live** — every session knows what the rest of the crew is doing, refreshed as it changes.
 - **Agent-to-agent mail** — `crew send` drops a message into another agent's context within seconds, even mid-turn.
 - **A human view** — one command shows every session's status, recap, and transcript tail; `--json` for scripts and agents.
-- **Zero config** — `npm i -g` wires both products' hooks, or install it as a plugin. Token-frugal and fail-safe by design; reads transcripts, never modifies them.
+- **Zero config** — `npm i -g` wires all three products, or install it as a plugin. Token-frugal and fail-safe by design; reads transcripts, never modifies them.
 
 ## Install
 
@@ -34,7 +34,7 @@ crew auto-injects what your other running [Claude Code](https://claude.com/claud
 npm install -g @0xmmo/crew
 ```
 
-That's the whole setup: installing globally wires the hook into `~/.claude/settings.json` and `~/.codex/hooks.json` automatically. (If your npm has `ignore-scripts=true`, postinstall can't run; do it with `crew install-hook` once instead.) Requires Node.js ≥ 18. macOS and Linux.
+That's the whole setup: installing globally wires the hook into `~/.claude/settings.json` and `~/.codex/hooks.json`, and drops a generated crew plugin into `~/.config/opencode/plugins/`, automatically. (If your npm has `ignore-scripts=true`, postinstall can't run; do it with `crew install-hook` once instead.) Requires Node.js ≥ 18. macOS and Linux.
 
 Codex reviews user-installed command hooks before running them. Start a new Codex session, open `/hooks`, and trust crew when prompted. Claude Code uses the hook immediately.
 
@@ -96,15 +96,17 @@ When it arrives depends on what the target is doing:
 |---|---|
 | busy, mid-turn | after its next tool call, typically seconds |
 | finishing a turn | at turn end, and the agent acts on it before going idle |
-| idle | on its next user prompt |
+| idle | on its next user prompt — or within ~15s for a kickstart to opencode |
 
-An idle session can't be woken externally, so undelivered mail waits in `~/.crew/inbox/` until its TTL expires; the `crew` view shows a 📨 pending count for it in the meantime. Once delivered, a message becomes part of the target's context, like anything else it read. Each message is delivered exactly once, even when hook events race. In Codex, pending mail at `Stop` deliberately continues the turn once so the agent can act on it before becoming idle.
+An idle Claude or Codex session can't be woken externally, so undelivered mail waits in `~/.crew/inbox/` until its TTL expires; the `crew` view shows a 📨 pending count for it in the meantime. Once delivered, a message becomes part of the target's context, like anything else it read. Each message is delivered exactly once, even when hook events race. In Codex, pending mail at `Stop` deliberately continues the turn once so the agent can act on it before becoming idle.
 
-**`--kickstart` (`-k`)** turns a message from passive context into a directive. Normally mail delivered as a session finishes its turn is injected as context the agent *may* act on; a kickstart message instead force-continues the agent (via the `Stop` hook's `decision: block`), so it keeps working and acts on the message rather than going idle — the same continuation Codex mail already does, made explicit and on demand for Claude too. It catches the target the moment it *would* stop; a session already sitting idle has no upcoming `Stop` to catch, so `crew send` warns you and the message waits like normal mail until the session next runs.
+**`--kickstart` (`-k`)** turns a message from passive context into a directive. Normally mail delivered as a session finishes its turn is injected as context the agent *may* act on; a kickstart message instead force-continues the agent (via the `Stop` hook's `decision: block`), so it keeps working and acts on the message rather than going idle — the same continuation Codex mail already does, made explicit and on demand for Claude too. It catches the target the moment it *would* stop; a Claude or Codex session already sitting idle has no upcoming `Stop` to catch, so `crew send` warns you and the message waits like normal mail until the session next runs. An **opencode** target is the exception: crew's plugin runs inside the opencode process and can prompt an idle session from within, so a kickstart wakes it within ~15 seconds — plain mail still waits politely for its next turn.
 
 ### Waking a fully-idle agent
 
-A session sitting idle at its prompt can't be woken by a hook — its `Stop` already fired, and Claude Code exposes no API to inject a prompt into a running interactive session ([open feature request](https://github.com/anthropics/claude-code/issues/27441)). Writing bytes to its terminal doesn't help either: Claude's input uses bracketed-paste mode, so a piped carriage return is swallowed as a literal newline rather than submitting.
+An idle **opencode** session just wakes: send with `--kickstart` and the crew plugin's poller prompts it from inside the process within ~15 seconds.
+
+For Claude and Codex, a session sitting idle at its prompt can't be woken by a hook — its `Stop` already fired, and Claude Code exposes no API to inject a prompt into a running interactive session ([open feature request](https://github.com/anthropics/claude-code/issues/27441)). Writing bytes to its terminal doesn't help either: Claude's input uses bracketed-paste mode, so a piped carriage return is swallowed as a literal newline rather than submitting.
 
 The one mechanism that works is a terminal multiplexer, which owns the pty and can deliver a *standalone* Enter key event. If you run agents inside **tmux**, you can wake an idle one yourself:
 
@@ -146,7 +148,7 @@ crew --help
    17:42 ‹ All 142 tests pass.
 ```
 
-- **agent** — `claude` or `codex`.
+- **agent** — `claude`, `codex`, or `opencode`.
 - **status** — `busy` (working), `idle` (awaiting input), or Claude's `shell` state.
 - **recap** — the session's most recent completion/recap, when available.
 - **tail** — the last N transcript entries: `›` you, `‹` the agent, `⚙` tool call, `⟲` tool result.
@@ -170,6 +172,8 @@ Tool input/output is truncated by default; pass `--full` for the complete conten
 - **`PostToolUse`** — mail only: a busy agent receives messages after supported tool calls, typically within seconds of `crew send`.
 - **`Stop`** — mail only: an agent finishing its turn handles waiting messages instead of going idle. A `--kickstart` message force-continues the turn here (`decision: block`) so the agent acts on it rather than injecting it as passive context.
 
+**opencode has no hook file; it gets a generated plugin instead** (`~/.config/opencode/plugins/crew.js`), a thin adapter that runs inside the opencode process and shells back out to `crew --hook` with the same payloads: `chat.message` maps to `UserPromptSubmit` (context lands as a synthetic message part), `tool.execute.after` to `PostToolUse` (mail is appended to the tool result), and `session.idle` to `Stop`. It also tags every shell command with `CREW_SESSION_ID` so sender attribution works even though one opencode process hosts many sessions, and polls the inbox of idle sessions so a kickstart can wake them via the SDK. All behavior lives in the crew CLI the plugin calls, so upgrading crew upgrades running plugins without a reinstall. At `Stop`, plain mail is deliberately left queued — draining it into a session that's about to go idle would lose it — and only a pending kickstart triggers the wake.
+
 The hook is careful about tokens and safety:
 
 - Emits **nothing** when no other sessions are running, and nothing on `UserPromptSubmit` when the crew status hasn't changed since the last emit (a per-session hash under your temp dir).
@@ -181,8 +185,8 @@ The hook is careful about tokens and safety:
 Managing it:
 
 ```sh
-crew uninstall-hook              # remove it from both products
-crew install-hook                # add it to Claude Code and Codex (idempotent)
+crew uninstall-hook              # remove it from all three products
+crew install-hook                # add it to Claude Code, Codex, and opencode (idempotent)
 CREW_NO_HOOK=1 npm i -g @0xmmo/crew   # install without touching hook settings
 ```
 
@@ -213,9 +217,11 @@ Every interactive Claude Code session writes `~/.claude/sessions/<pid>.json` whi
 
 Codex supplies `session_id`, `transcript_path`, `cwd`, and lifecycle state to hooks. crew records those fields in a small live registry under `~/.crew/sessions/`, verifies the owning process is still alive, and parses the useful user/assistant/tool subset of the rollout. Top-level interactive and `codex exec` sessions are included; internal Codex subagents are intentionally not listed as separate crew members because they share their parent's lifecycle and mailbox. Codex documents its transcript format as non-stable, so crew skips unknown rollout records defensively.
 
-Both discovery paths are read-only with respect to agent state and transcripts. In hook mode crew excludes the session it is reporting to, so an agent never sees itself listed.
+opencode sessions register in the same `~/.crew/sessions/` registry via the generated plugin, which identifies itself over env (`CREW_AGENT`/`CREW_PID`) rather than process-tree guessing. Transcripts are read on demand from opencode's SQLite store (`~/.local/share/opencode/opencode.db`, message/part tables) through the `sqlite3` CLI — read-only, degrading to a status-only listing when `sqlite3` isn't available. Like the Codex rollout, that schema is treated as a convenience input, not a stable API. Subagent (child) sessions are skipped, as are crew's own injected context parts, and deleted sessions are dropped from the registry immediately.
 
-Set `CLAUDE_HOME` or `CODEX_HOME` for non-default product state directories. The Claude hook installer also honors `CLAUDE_CONFIG_DIR`; set `CREW_HOME` to move shared registry/mailbox state from `~/.crew`.
+All discovery paths are read-only with respect to agent state and transcripts. In hook mode crew excludes the session it is reporting to, so an agent never sees itself listed.
+
+Set `CLAUDE_HOME` or `CODEX_HOME` for non-default product state directories. The Claude hook installer also honors `CLAUDE_CONFIG_DIR`; opencode paths follow `XDG_CONFIG_HOME`/`XDG_DATA_HOME`; set `CREW_HOME` to move shared registry/mailbox state from `~/.crew`.
 
 ## Development
 

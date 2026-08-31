@@ -1,7 +1,7 @@
 {
   "name": "@0xmmo/crew",
   "version": "0.2.5",
-  "description": "Let Claude Code and Codex agents talk to each other: live shared context and agent-to-agent messaging across sessions.",
+  "description": "Let Claude Code, Codex, and opencode agents talk to each other: live shared context and agent-to-agent messaging across sessions.",
   "type": "commonjs",
   "bin": {
     "crew": "dist/crew.js"
@@ -37,7 +37,9 @@
     "sessions",
     "agents",
     "terminal",
-    "ndjson"
+    "ndjson",
+    "opencode",
+    "opencode-plugin"
   ],
   "author": "",
   "license": "MIT",
