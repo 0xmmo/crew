@@ -2,7 +2,9 @@
 
 # crew
 
-**Let Claude Code, Codex, and opencode agents talk to each other.**
+**Let agents talk to each other.**
+
+<sub><b>Claude Code · Codex · opencode</b></sub>
 
 <sub>Ship features in parallel, no branches, no worktrees. Hand off work between sessions,<br>steer around each other's in-flight edits, announce deploys to every running agent.</sub>
 
