@@ -22,8 +22,9 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test test/*.test.cjs",
     "postinstall": "node dist/postinstall.js || true",
-    "version": "node -e \"const fs=require('fs');const v=require('./package.json').version;for(const p of ['.claude-plugin/plugin.json','.codex-plugin/plugin.json']){const j=JSON.parse(fs.readFileSync(p,'utf8'));j.version=v;fs.writeFileSync(p,JSON.stringify(j,null,2)+'\\n')}\" && git add .claude-plugin/plugin.json .codex-plugin/plugin.json",
-    "send": "npm run build && node -e \"const fs=require('fs');const v=require('./package.json').version.split('.');v[2]=+v[2]+1;for(const p of ['.claude-plugin/plugin.json','.codex-plugin/plugin.json']){const j=JSON.parse(fs.readFileSync(p,'utf8'));j.version=v.join('.');fs.writeFileSync(p,JSON.stringify(j,null,2)+'\\n')}\" && git add . && (git diff --cached --quiet || git commit -am checkpoint) && npm version patch && npm login && npm publish"
+    "version": "npm run sync-manifests && git add .claude-plugin/plugin.json .codex-plugin/plugin.json",
+    "send": "npm run build && npm test && npm version patch --no-git-tag-version && npm run sync-manifests && git add -A && git commit -m \"$(node -p \"'v'+require('./package.json').version\")\" && git tag \"$(node -p \"'v'+require('./package.json').version\")\" && npm login && npm publish && git push origin main --tags",
+    "sync-manifests": "node -e \"const fs=require('fs');const v=JSON.parse(fs.readFileSync('package.json','utf8')).version;for(const p of ['.claude-plugin/plugin.json','.codex-plugin/plugin.json']){const j=JSON.parse(fs.readFileSync(p,'utf8'));j.version=v;fs.writeFileSync(p,JSON.stringify(j,null,2)+'\\n')}console.log('manifests synced to '+v)\""
   },
   "keywords": [
     "claude",
