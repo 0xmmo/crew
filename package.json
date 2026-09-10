@@ -1,6 +1,6 @@
 {
   "name": "@0xmmo/crew",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Let Claude Code, Codex, and OpenCode agents talk to each other: live shared context and agent-to-agent messaging across sessions.",
   "type": "commonjs",
   "bin": {
