@@ -14,6 +14,7 @@ const {
 const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
+const { randomBytes } = require("node:crypto");
 const { test } = require("node:test");
 
 const root = resolve(__dirname, "..");
@@ -500,37 +501,49 @@ test("concurrent drains deliver each message exactly once", async () => {
     dropMessage(inboxDir(h.env, sid), baseMsg({ text: `concurrent-${i}-marker` }));
   }
 
-  // Spawning is not simultaneous — process startup jitter alone lets the first
-  // drainer finish before the last one starts, and then nothing is contended.
-  // Every drainer spins to a shared wall-clock instant and enters drainInbox
-  // together, which is the race the rename-to-claim exists to survive.
-  const startAt = Date.now() + 500;
+  // Spawning is not simultaneous: process startup jitter alone lets the first
+  // drainer finish before the last one starts, and then nothing is contended
+  // and the test proves nothing. A wall-clock deadline is no better, because a
+  // loaded machine blows through it. So the drainers announce themselves and
+  // then spin on a gate file the parent opens once every one of them is ready.
+  const drainers = 6;
+  const ready = join(h.root, "ready");
+  const gate = join(h.root, "gate");
+  mkdirSync(ready, { recursive: true });
   const drainer = `
+    const { writeFileSync, existsSync } = require("node:fs");
     const { drainInbox } = require(${JSON.stringify(join(root, "dist", "mailbox.js"))});
-    while (Date.now() < Number(process.env.CREW_TEST_START_AT)) {}
+    writeFileSync(${JSON.stringify(ready)} + "/" + process.pid, "");
+    while (!existsSync(${JSON.stringify(gate)})) {} // spin: all six leave together
     const claimed = drainInbox(${JSON.stringify(sid)});
     process.stdout.write(JSON.stringify(claimed.map((m) => m.text)));
   `;
-  const drains = await Promise.all(
-    Array.from(
-      { length: 8 },
-      () =>
-        new Promise((done) => {
-          const child = spawn(process.execPath, ["-e", drainer], {
-            env: { ...h.env, CREW_TEST_START_AT: String(startAt) },
-            stdio: ["ignore", "pipe", "pipe"],
-          });
-          let stdout = "";
-          let stderr = "";
-          child.stdout.on("data", (c) => (stdout += c));
-          child.stderr.on("data", (c) => (stderr += c));
-          child.on("close", (status) => done({ status, stdout, stderr }));
-        }),
-    ),
+  const drains = Array.from(
+    { length: drainers },
+    () =>
+      new Promise((done) => {
+        const child = spawn(process.execPath, ["-e", drainer], {
+          env: h.env,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (c) => (stdout += c));
+        child.stderr.on("data", (c) => (stderr += c));
+        child.on("close", (status) => done({ status, stdout, stderr }));
+      }),
   );
 
+  const deadline = Date.now() + 30_000;
+  while (readdirSync(ready).length < drainers) {
+    assert.ok(Date.now() < deadline, "drainers never reached the gate");
+    await new Promise((tick) => setTimeout(tick, 20));
+  }
+  writeFileSync(gate, ""); // open it: every drainer enters drainInbox at once
+  const results = await Promise.all(drains);
+
   const seen = [];
-  for (const drain of drains) {
+  for (const drain of results) {
     assert.equal(drain.status, 0, drain.stderr);
     seen.push(...JSON.parse(drain.stdout));
   }
@@ -540,7 +553,7 @@ test("concurrent drains deliver each message exactly once", async () => {
   assert.equal(seen.length, count, `lost mail: only ${seen.length}/${count}`);
   assert.deepEqual(pendingFiles(inboxDir(h.env, sid)), []);
   // The race must have actually happened, or this proves nothing.
-  const winners = drains.filter((d) => JSON.parse(d.stdout).length > 0).length;
+  const winners = results.filter((d) => JSON.parse(d.stdout).length > 0).length;
   assert.ok(winners > 1, `only ${winners} drainer claimed anything; not contended`);
 });
 
@@ -548,7 +561,9 @@ test(
   "the default mailbox is a 0700 per-uid directory under /tmp",
   { skip: process.platform === "win32" && "POSIX layout only" },
   (t) => {
-    const sid = "crew-selftest-default-layout";
+    // The real mailbox is shared with every other crew on this machine,
+    // including a second copy of this suite: never use a fixed id in it.
+    const sid = `crew-selftest-${process.pid}-${randomBytes(4).toString("hex")}`;
     const env = { ...process.env };
     delete env.CREW_INBOX_ROOT; // exercise the real default resolution
     const probe = spawnSync(
