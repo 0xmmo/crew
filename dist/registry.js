@@ -69,7 +69,7 @@ function isAgent(value) {
     return value === "claude" || value === "codex" || value === "opencode";
 }
 /**
- * crew's own adapters (the opencode plugin) identify themselves via env when
+ * crew's own adapters (the OpenCode plugin) identify themselves via env when
  * spawning `crew --hook`, which beats process-tree guessing and still works
  * where `ps` is blocked.
  */
@@ -104,11 +104,8 @@ function hookAgent(input, ancestorAgent) {
     }
     return ancestorAgent ?? agentAncestor()?.agent ?? "claude";
 }
-function safeId(sid) {
-    return sid.replace(/[^a-zA-Z0-9._-]/g, "_");
-}
 function registryPath(sid) {
-    return (0, node_path_1.join)(SESSION_ROOT, `${safeId(sid)}.json`);
+    return (0, node_path_1.join)(SESSION_ROOT, `${(0, home_1.safeSessionId)(sid)}.json`);
 }
 function readRegistered(path) {
     try {

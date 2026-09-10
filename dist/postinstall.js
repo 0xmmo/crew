@@ -1,6 +1,6 @@
 "use strict";
 /**
- * npm postinstall — auto-wire crew into Claude Code, Codex, and opencode.
+ * npm postinstall — auto-wire crew into Claude Code, Codex, and OpenCode.
  *
  * Runs only on global installs (`npm i -g`). Set CREW_NO_HOOK=1 to opt out.
  * Never fails the install: errors are reported and swallowed.

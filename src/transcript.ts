@@ -27,7 +27,7 @@ const STRIP: RegExp[] = [
   /<system-reminder>[\s\S]*?<\/system-reminder>/g,
   /<command-[^>]*>[\s\S]*?<\/command-[^>]*>/g,
   /<local-command-[^>]*>[\s\S]*?<\/local-command-[^>]*>/g,
-  // crew's own injections (e.g. mail appended to opencode tool outputs);
+  // crew's own injections (e.g. mail appended to OpenCode tool outputs);
   // other sessions shouldn't see crew talking to itself.
   /<crew-messages>[\s\S]*?<\/crew-messages>/g,
 ];

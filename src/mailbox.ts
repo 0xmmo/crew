@@ -1,13 +1,21 @@
 /**
- * mailbox.ts — file-based messaging between Claude Code and Codex sessions.
+ * mailbox.ts — file-based messaging between Claude Code, Codex, and OpenCode
+ * sessions.
  *
- * `crew send` drops a JSON file into ~/.crew/inbox/<session-id>/; the
+ * `crew send` drops a JSON file into /tmp/crew-<uid>/inbox/<session-id>/; the
  * target session's `crew --hook` drains its inbox on its next hook event and
  * injects the messages as additionalContext. Claiming a message renames it
  * first, so racing hook events deliver each message at most once.
+ *
+ * The mailbox lives in /tmp rather than ~/.crew because sandboxed agents are
+ * routinely denied writes under $HOME. That trade is deliberate and visible:
+ * mail is temporary, and a reboot or a /tmp sweep takes undelivered messages
+ * with it. Config and the session registry stay in ~/.crew, where they last.
  */
 
 import {
+  chmodSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -19,10 +27,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { crewHome, legacyCrewHome } from "./home";
-
-export const INBOX_ROOT = join(crewHome(), "inbox");
-const LEGACY_INBOX_ROOT = join(legacyCrewHome(), "inbox");
+import { inboxLocation, inboxRoots, safeSessionId } from "./home";
 
 // Sessions can come back via --resume, so mail is pruned by age, not liveness.
 const MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000;
@@ -45,33 +50,110 @@ export interface Message {
   kickstart?: boolean;
 }
 
+/** A send that failed for a reason worth showing the user verbatim. */
+export class MailboxError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MailboxError";
+  }
+}
+
+function mailboxError(dir: string, err: unknown): MailboxError {
+  const code = (err as NodeJS.ErrnoException)?.code;
+  if (code === "EPERM" || code === "EACCES") {
+    return new MailboxError(
+      `crew: no permission to write the mailbox at ${dir} (${code}).\n` +
+        `      A sandbox is denying it. Allow writes to ${inboxLocation().base}, ` +
+        `or set CREW_INBOX_ROOT to a directory this process can write.`,
+    );
+  }
+  const detail = (err as NodeJS.ErrnoException)?.message ?? String(err);
+  return new MailboxError(`crew: cannot use the mailbox at ${dir} — ${detail}`);
+}
+
+/**
+ * Create `dir` 0700 and refuse to use it unless we own it. The mailbox sits
+ * under a world-writable /tmp, where anyone can pre-create our name as a
+ * symlink pointing somewhere they can read, or as a directory they can list.
+ */
+function secureDir(dir: string): void {
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  } catch (err) {
+    throw mailboxError(dir, err);
+  }
+  let st;
+  try {
+    st = lstatSync(dir); // lstat, not stat: a symlink must not be followed
+  } catch (err) {
+    throw mailboxError(dir, err);
+  }
+  if (st.isSymbolicLink()) {
+    throw new MailboxError(
+      `crew: mailbox path ${dir} is a symlink; refusing to follow it. ` +
+        `Remove it, or set CREW_INBOX_ROOT to a directory you control.`,
+    );
+  }
+  if (!st.isDirectory()) {
+    throw new MailboxError(`crew: mailbox path ${dir} is not a directory.`);
+  }
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  if (uid === null) return; // no ownership model to check against (Windows)
+  if (st.uid !== uid) {
+    throw new MailboxError(
+      `crew: mailbox path ${dir} is owned by uid ${st.uid}, not ${uid}. ` +
+        `Refusing to use it; set CREW_INBOX_ROOT to a directory you own.`,
+    );
+  }
+  if ((st.mode & 0o077) !== 0) {
+    try {
+      chmodSync(dir, 0o700); // ours, just too open — tighten rather than fail
+    } catch (err) {
+      throw mailboxError(dir, err);
+    }
+  }
+}
+
+function inboxDir(sid: string, root: string): string {
+  return join(root, safeSessionId(sid));
+}
+
+/** Verify and create the path down to one session's inbox. */
+function ensureInboxDir(sid: string): string {
+  const { base, root } = inboxLocation();
+  const dir = inboxDir(sid, root);
+  const chain = base === root ? [root, dir] : [base, root, dir];
+  for (const d of chain) secureDir(d);
+  return dir;
+}
+
 function expired(m: Message): boolean {
   const t = Date.parse(m.expiresAt ?? "");
   return Number.isFinite(t) && t < Date.now();
 }
 
-function inboxDir(sid: string, root = INBOX_ROOT): string {
-  return join(root, sid);
-}
-
+/** Throws MailboxError if the message could not be published. */
 export function sendMessage(targetSid: string, msg: Message): void {
-  const dir = inboxDir(targetSid);
-  mkdirSync(dir, { recursive: true });
+  const dir = ensureInboxDir(targetSid);
   const name = `${Date.now()}-${randomBytes(4).toString("hex")}.json`;
   const tmp = join(dir, `.${name}.tmp`);
-  writeFileSync(tmp, JSON.stringify(msg));
-  renameSync(tmp, join(dir, name));
+  try {
+    // Write to a dotfile readers skip, then rename: a reader never sees a
+    // partially written message, and the caller is only told "queued" once
+    // this rename has returned.
+    writeFileSync(tmp, JSON.stringify(msg), { mode: 0o600 });
+    renameSync(tmp, join(dir, name));
+  } catch (err) {
+    try {
+      unlinkSync(tmp);
+    } catch {}
+    throw mailboxError(dir, err);
+  }
 }
 
 interface MessageFile {
   root: string;
   name: string;
-}
-
-function inboxRoots(): string[] {
-  return INBOX_ROOT === LEGACY_INBOX_ROOT
-    ? [INBOX_ROOT]
-    : [INBOX_ROOT, LEGACY_INBOX_ROOT];
 }
 
 function listMessageFiles(sid: string): MessageFile[] {
@@ -87,6 +169,7 @@ function listMessageFiles(sid: string): MessageFile[] {
       // no inbox in this root
     }
   }
+  // Names start with the send timestamp, so this is delivery order across roots.
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -125,13 +208,22 @@ export function drainInbox(sid: string): Message[] {
   const out: Message[] = [];
   for (const f of listMessageFiles(sid)) {
     const path = messagePath(sid, f);
-    const claimed = `${path}.claimed`;
+    // The claim name carries the claimer's pid. With a shared name, a drainer
+    // that lost the rename still ran its cleanup and unlinked the winner's
+    // file out from under it mid-read, and that message was gone: claimed by
+    // one process, delivered by none.
+    const claimed = `${path}.${process.pid}.claimed`;
     try {
       renameSync(path, claimed); // throws if another drain won the race
+    } catch {
+      continue; // someone else claimed it first
+    }
+    // Past the rename this message is ours alone: read it, then drop it.
+    try {
       const m: Message = JSON.parse(readFileSync(claimed, "utf8"));
       if (!expired(m)) out.push(m); // expired mail is claimed and discarded
     } catch {
-      continue;
+      // corrupt or truncated; the claim already took it out of circulation
     } finally {
       try {
         unlinkSync(claimed);

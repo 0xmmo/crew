@@ -1,9 +1,9 @@
 /**
- * settings.ts — wire crew's context hook into Claude Code, Codex, and opencode.
+ * settings.ts — wire crew's context hook into Claude Code, Codex, and OpenCode.
  *
  * Claude and Codex use the same hook event/config shape: crew is merged into
  * each user hook file without touching unrelated settings, and never written
- * over a file we cannot parse. opencode has no hook file; its "install" is a
+ * over a file we cannot parse. OpenCode has no hook file; its "install" is a
  * generated plugin dropped into the global plugins directory (see opencode.ts).
  */
 
@@ -29,7 +29,7 @@ export const AGENTS = ["claude", "codex", "opencode"] as const;
 export const AGENT_LABELS: Record<Agent, string> = {
   claude: "Claude Code",
   codex: "Codex",
-  opencode: "opencode",
+  opencode: "OpenCode",
 };
 
 export const HOOK_COMMAND = "crew --hook";
@@ -91,7 +91,7 @@ function readSettings(path: string): Record<string, any> {
   return parsed;
 }
 
-/** The generated opencode plugin, with crew's runtime paths baked in. */
+/** The generated OpenCode plugin, with crew's runtime paths baked in. */
 function renderedOpencodePlugin(): string {
   return opencodePluginSource(process.execPath, join(__dirname, "crew.js"));
 }

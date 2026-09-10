@@ -2,7 +2,7 @@
   "name": "crew",
   "displayName": "crew",
   "version": "0.3.1",
-  "description": "Live shared context and messaging across Claude Code, Codex, and opencode sessions.",
+  "description": "Live shared context and messaging across Claude Code, Codex, and OpenCode sessions.",
   "author": {
     "name": "0xmmo",
     "url": "https://github.com/0xmmo"

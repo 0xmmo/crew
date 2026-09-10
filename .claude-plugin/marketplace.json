@@ -1,6 +1,6 @@
 {
   "name": "0xmmo",
-  "description": "Plugins by 0xmmo. crew: let Claude Code, Codex, and opencode agents talk to each other.",
+  "description": "Plugins by 0xmmo. crew: let Claude Code, Codex, and OpenCode agents talk to each other.",
   "owner": {
     "name": "Mo Moustafa",
     "url": "https://github.com/0xmmo"
@@ -9,7 +9,7 @@
     {
       "name": "crew",
       "source": "./",
-      "description": "Live shared context and messaging across Claude Code, Codex, and opencode sessions.",
+      "description": "Live shared context and messaging across Claude Code, Codex, and OpenCode sessions.",
       "homepage": "https://github.com/0xmmo/crew",
       "author": {
         "name": "0xmmo",

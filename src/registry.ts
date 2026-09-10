@@ -17,7 +17,7 @@ import {
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, resolve } from "node:path";
-import { crewHome } from "./home";
+import { crewHome, safeSessionId } from "./home";
 import { Agent } from "./settings";
 
 const SESSION_ROOT = join(crewHome(), "sessions");
@@ -89,7 +89,7 @@ function isAgent(value: unknown): value is Agent {
 }
 
 /**
- * crew's own adapters (the opencode plugin) identify themselves via env when
+ * crew's own adapters (the OpenCode plugin) identify themselves via env when
  * spawning `crew --hook`, which beats process-tree guessing and still works
  * where `ps` is blocked.
  */
@@ -126,12 +126,8 @@ export function hookAgent(input: HookSessionInput, ancestorAgent?: Agent): Agent
   return ancestorAgent ?? agentAncestor()?.agent ?? "claude";
 }
 
-function safeId(sid: string): string {
-  return sid.replace(/[^a-zA-Z0-9._-]/g, "_");
-}
-
 function registryPath(sid: string): string {
-  return join(SESSION_ROOT, `${safeId(sid)}.json`);
+  return join(SESSION_ROOT, `${safeSessionId(sid)}.json`);
 }
 
 function readRegistered(path: string): RegisteredSession | null {

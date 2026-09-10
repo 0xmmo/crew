@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * crew — shared context for Claude Code, Codex, and opencode agents.
+ * crew — shared context for Claude Code, Codex, and OpenCode agents.
  *
  * First and foremost an agent hook: `crew --hook` reads the hook event on
  * stdin and emits what your other running sessions are doing (status, recap,
@@ -8,12 +8,12 @@
  * the rest of the crew. Also a CLI for watching the same thing yourself.
  *
  * Claude sessions are discovered from Claude's live PID registry. All hooks
- * (opencode's arrive via its generated crew plugin, see opencode.ts) also
+ * (OpenCode's arrive via its generated crew plugin, see opencode.ts) also
  * maintain a tiny product-neutral live registry, which lets sessions from
  * every product share one view and mailbox.
  *
  *   crew --hook          hook mode: emit other sessions as additionalContext JSON
- *   crew install-hook    wire crew into Claude Code, Codex, and opencode
+ *   crew install-hook    wire crew into Claude Code, Codex, and OpenCode
  *   crew uninstall-hook  remove it
  *   crew send <t> "msg"  message another session (delivered via its hook)
  *   crew send -k <t> ... kickstart: force the target to act on the message
@@ -49,6 +49,7 @@ import {
 } from "./settings";
 import {
   DEFAULT_TTL_MS,
+  MailboxError,
   Message,
   drainInbox,
   peekInbox,
@@ -185,13 +186,13 @@ function underDir(cwd: string, dir: string | null): boolean {
 function printHelp(): void {
   process.stdout.write(
     [
-      "crew — shared context and messaging for Claude Code, Codex, and opencode agents",
+      "crew — shared context and messaging for Claude Code, Codex, and OpenCode agents",
       "",
       "Hook (auto-injects other sessions into agent context):",
       "  crew --hook [N]       read a hook event on stdin, emit other sessions as",
       "                        additionalContext JSON (default N=5 tail entries)",
       "  crew install-hook     wire crew into Claude Code + Codex (hooks) and",
-      "                        opencode (a generated plugin)",
+      "                        OpenCode (a generated plugin)",
       "  crew uninstall-hook   remove it from all three",
       "",
       "Messaging (delivered into the target agent's context via the hook):",
@@ -212,8 +213,9 @@ function printHelp(): void {
       "Env:",
       "  CLAUDE_HOME           override ~/.claude",
       "  CODEX_HOME            override ~/.codex",
-      "  XDG_CONFIG_HOME/XDG_DATA_HOME  override opencode's plugin/db locations",
-      "  CREW_HOME             override shared state at ~/.crew",
+      "  XDG_CONFIG_HOME/XDG_DATA_HOME  override OpenCode's plugin/db locations",
+      "  CREW_HOME             override config + session registry at ~/.crew",
+      "  CREW_INBOX_ROOT       override the mailbox at /tmp/crew-<uid>/inbox",
       "  CREW_NO_HOOK=1        skip hook auto-install on `npm i -g`",
       "",
     ].join("\n"),
@@ -624,7 +626,7 @@ function listSessionRefs(): SessionRef[] {
  */
 function senderSession(refs: SessionRef[]): SessionRef | null {
   const envSid =
-    process.env.CREW_SESSION_ID || // set by the opencode plugin's shell.env
+    process.env.CREW_SESSION_ID || // set by the OpenCode plugin's shell.env
     process.env.CODEX_THREAD_ID ||
     process.env.CLAUDE_SESSION_ID;
   if (envSid) {
@@ -723,14 +725,40 @@ function runSend(argv: string[]): void {
     expiresAt: new Date(now + ttlMs).toISOString(),
     ...(kickstart ? { kickstart: true } : {}),
   };
-  for (const r of targets) sendMessage(r.sessionId, msg);
-  const names = targets.map((r) => r.sessionId.slice(0, 8)).join(", ");
+  // Nothing is reported as queued until its atomic write has returned. A
+  // sandbox that denies the mailbox fails here, and saying "queued" anyway
+  // would leave the sender believing a message that never landed was sent.
+  const delivered: SessionRef[] = [];
+  const failed: SessionRef[] = [];
+  const errors: string[] = [];
+  for (const r of targets) {
+    try {
+      sendMessage(r.sessionId, msg);
+      delivered.push(r);
+    } catch (err) {
+      failed.push(r);
+      const detail =
+        err instanceof MailboxError
+          ? err.message
+          : `crew: send failed — ${(err as Error).message}`;
+      if (!errors.includes(detail)) errors.push(detail); // one cause, once
+    }
+  }
+  if (failed.length > 0) {
+    for (const detail of errors) process.stderr.write(`${detail}\n`);
+    process.stderr.write(
+      `crew: NOT queued for ${failed.map((r) => r.sessionId.slice(0, 8)).join(", ")}\n`,
+    );
+    process.exitCode = 1; // exitCode, not exit(): let queued output flush
+  }
+  if (delivered.length === 0) return;
+  const names = delivered.map((r) => r.sessionId.slice(0, 8)).join(", ");
   if (kickstart) {
     // A kickstart force-continues the target when its Stop hook next fires. A
     // busy agent hits that the moment its current turn ends. An already-idle
-    // agent has no upcoming Stop — except opencode, whose crew plugin polls
+    // agent has no upcoming Stop — except OpenCode, whose crew plugin polls
     // the inbox and can wake a stopped session from inside the process.
-    for (const r of targets.filter((t) => t.status === "idle")) {
+    for (const r of delivered.filter((t) => t.status === "idle")) {
       if (r.agent === "opencode") {
         process.stdout.write(
           `crew: ${r.sessionId.slice(0, 8)} is idle — its crew plugin will wake it within ~15s.\n`,
@@ -999,11 +1027,11 @@ function runHook(opts: Opts): void {
       : "SessionStart";
     const sid = typeof input.session_id === "string" ? input.session_id : "";
     if (event === "SessionEnd") {
-      // The session is gone (opencode reports deletions); nothing to emit.
+      // The session is gone (OpenCode reports deletions); nothing to emit.
       removeSession(sid);
       return;
     }
-    // An idle opencode session can only receive mail by being woken (the
+    // An idle OpenCode session can only receive mail by being woken (the
     // plugin prompts it), which only kickstart mail justifies — plain mail
     // stays queued for its next turn instead of being drained into the void.
     if (

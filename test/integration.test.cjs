@@ -1,10 +1,14 @@
 const assert = require("node:assert/strict");
 const {
+  chmodSync,
   existsSync,
+  lstatSync,
   mkdtempSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
+  symlinkSync,
   writeFileSync,
 } = require("node:fs");
 const { tmpdir } = require("node:os");
@@ -27,11 +31,77 @@ function baseMsg(extra) {
   };
 }
 
-function writeInbox(env, sid, msg) {
-  const dir = join(env.CREW_HOME, "inbox", sid);
+function inboxDir(env, sid) {
+  return join(env.CREW_INBOX_ROOT, sid);
+}
+
+/** Inboxes written by crew <= 0.3.x, still drained during migration. */
+function legacyInboxDir(env, sid, era) {
+  return era === "0.2"
+    ? join(env.CLAUDE_HOME, "crew", "inbox", sid)
+    : join(env.CREW_HOME, "inbox", sid);
+}
+
+function dropMessage(dir, msg) {
   mkdirSync(dir, { recursive: true });
   const name = `${Date.now()}-${Math.random().toString(16).slice(2, 10)}.json`;
   writeFileSync(join(dir, name), JSON.stringify(msg));
+}
+
+function writeInbox(env, sid, msg) {
+  dropMessage(inboxDir(env, sid), msg);
+}
+
+function pendingFiles(dir) {
+  try {
+    return readdirSync(dir).filter((f) => f.endsWith(".json"));
+  } catch {
+    return [];
+  }
+}
+
+/** A live session record, as the hooks would have registered it. */
+function registerSession(env, sid, pid, extra) {
+  mkdirSync(join(env.CREW_HOME, "sessions"), { recursive: true });
+  writeFileSync(
+    join(env.CREW_HOME, "sessions", `${sid}.json`),
+    JSON.stringify({
+      pid,
+      sessionId: sid,
+      agent: "claude",
+      status: "idle",
+      cwd: "/tmp/work",
+      startedAt: new Date().toISOString(),
+      lastSeen: new Date().toISOString(),
+      transcript: null,
+      ...extra,
+    }),
+  );
+}
+
+/** A process that stays alive so liveness pruning keeps the record. */
+function sleeper(t) {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1e9)"], {
+    stdio: "ignore",
+  });
+  t.after(() => child.kill());
+  return child;
+}
+
+function runAsync(args, env, input) {
+  return new Promise((done) => {
+    const child = spawn(process.execPath, [crew, ...args], {
+      cwd: root,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (c) => (stdout += c));
+    child.stderr.on("data", (c) => (stderr += c));
+    child.on("close", (status) => done({ status, stdout, stderr }));
+    child.stdin.end(input);
+  });
 }
 
 function stopHook(env, sid, event = "Stop") {
@@ -54,10 +124,12 @@ function homes() {
     CLAUDE_HOME: join(root, "claude"),
     CODEX_HOME: join(root, "codex"),
     CREW_HOME: join(root, "crew"),
-    XDG_CONFIG_HOME: join(root, "xdg-config"), // opencode plugin location
-    XDG_DATA_HOME: join(root, "xdg-data"), // opencode sqlite location
+    CREW_INBOX_ROOT: join(root, "inbox"), // never the real /tmp/crew-<uid>
+
+    XDG_CONFIG_HOME: join(root, "xdg-config"), // OpenCode plugin location
+    XDG_DATA_HOME: join(root, "xdg-data"), // OpenCode sqlite location
   };
-  // The opencode plugin's own env identification must not leak between tests.
+  // The OpenCode plugin's own env identification must not leak between tests.
   delete env.CREW_AGENT;
   delete env.CREW_PID;
   delete env.CREW_SESSION_ID;
@@ -247,13 +319,13 @@ const hasSqlite3 =
   spawnSync("sqlite3", ["--version"], { encoding: "utf8" }).status === 0;
 
 test(
-  "opencode sessions register, read sqlite history, and gate Stop on kickstart",
+  "OpenCode sessions register, read sqlite history, and gate Stop on kickstart",
   { skip: !hasSqlite3 && "sqlite3 CLI not available" },
   async (t) => {
     const h = homes();
     const sid = "ses_crewtestopencode";
 
-    // Fixture: opencode's message/part tables, one user + one assistant turn.
+    // Fixture: OpenCode's message/part tables, one user + one assistant turn.
     const dbDir = join(h.env.XDG_DATA_HOME, "opencode");
     mkdirSync(dbDir, { recursive: true });
     const sql = (value) => `'${JSON.stringify(value).replace(/'/g, "''")}'`;
@@ -297,14 +369,13 @@ test(
     assert.equal(session.tail[1].summary, "List files");
     assert.equal(session.tail[3].text, "Two files found.");
 
-    // Plain mail must not be drained at Stop: an idle opencode session would
+    // Plain mail must not be drained at Stop: an idle OpenCode session would
     // never see it. It stays queued for the next turn.
     writeInbox(h.env, sid, baseMsg({ text: "plain hello" }));
     const plain = stopHook(env, sid);
     assert.equal(plain.status, 0, plain.stderr);
     assert.equal(plain.stdout.trim(), "");
-    let inbox = readdirSync(join(h.env.CREW_HOME, "inbox", sid));
-    assert.equal(inbox.filter((f) => f.endsWith(".json")).length, 1);
+    assert.equal(pendingFiles(inboxDir(h.env, sid)).length, 1);
 
     // Kickstart mail wakes the session: Stop returns a forced continuation
     // carrying everything pending, and the inbox drains.
@@ -315,10 +386,9 @@ test(
     assert.equal(kickOut.decision, "block");
     assert.match(kickOut.reason, /plain hello/);
     assert.match(kickOut.reason, /go fix the build/);
-    inbox = readdirSync(join(h.env.CREW_HOME, "inbox", sid));
-    assert.equal(inbox.filter((f) => f.endsWith(".json")).length, 0);
+    assert.equal(pendingFiles(inboxDir(h.env, sid)).length, 0);
 
-    // SessionEnd (opencode reports deleted sessions) drops the registry record.
+    // SessionEnd (OpenCode reports deleted sessions) drops the registry record.
     const ended = stopHook(env, sid, "SessionEnd");
     assert.equal(ended.status, 0, ended.stderr);
     assert.equal(ended.stdout.trim(), "");
@@ -328,25 +398,8 @@ test(
 
 test("send --kickstart flags the message and warns when the target is idle", async (t) => {
   const h = homes();
-  const sleeper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1e9)"], {
-    stdio: "ignore",
-  });
-  t.after(() => sleeper.kill());
   const sid = "claude-idle-target-session";
-  mkdirSync(join(h.env.CREW_HOME, "sessions"), { recursive: true });
-  writeFileSync(
-    join(h.env.CREW_HOME, "sessions", `${sid}.json`),
-    JSON.stringify({
-      pid: sleeper.pid,
-      sessionId: sid,
-      agent: "claude",
-      status: "idle",
-      cwd: "/tmp/work",
-      startedAt: new Date().toISOString(),
-      lastSeen: new Date().toISOString(),
-      transcript: null,
-    }),
-  );
+  registerSession(h.env, sid, sleeper(t).pid);
 
   const sent = run(
     ["send", sid.slice(0, 8), "deploy is unblocked, go", "--kickstart"],
@@ -356,10 +409,188 @@ test("send --kickstart flags the message and warns when the target is idle", asy
   assert.match(sent.stdout, /kickstart queued/);
   assert.match(sent.stderr, /idle/);
 
-  const dir = join(h.env.CREW_HOME, "inbox", sid);
-  const file = readdirSync(dir).find((f) => f.endsWith(".json"));
+  const dir = inboxDir(h.env, sid);
+  const [file] = pendingFiles(dir);
   const msg = JSON.parse(readFileSync(join(dir, file), "utf8"));
   assert.equal(msg.kickstart, true);
   assert.equal(msg.text, "deploy is unblocked, go");
+  // Mail no longer lands under the crew home, which sandboxes may deny.
+  assert.equal(existsSync(join(h.env.CREW_HOME, "inbox")), false);
 });
 
+
+test(
+  "cross-session send works when the crew home is read-only (sandboxed agent)",
+  { skip: process.getuid() === 0 && "root ignores mode bits" },
+  async (t) => {
+    const h = homes();
+    const target = "target-sandboxed-session";
+    const sender = "sender-sandboxed-session";
+    registerSession(h.env, target, sleeper(t).pid);
+    registerSession(h.env, sender, sleeper(t).pid, { status: "busy" });
+
+    // The reported failure: an agent sandbox denies writes anywhere under
+    // $HOME, so the old ~/.crew/inbox could not even be created. Reads and
+    // the existing registry still work, which is why crew looked healthy.
+    chmodSync(h.env.CREW_HOME, 0o500);
+    t.after(() => chmodSync(h.env.CREW_HOME, 0o700));
+    assert.throws(
+      () => mkdirSync(join(h.env.CREW_HOME, "inbox")),
+      /EACCES|EPERM/,
+      "the sandbox this test simulates must actually deny the legacy inbox",
+    );
+
+    const sent = run(["send", target.slice(0, 8), "sandboxed hello"], {
+      ...h.env,
+      CREW_SESSION_ID: sender, // attribute the send to the sender session
+    });
+    assert.equal(sent.status, 0, sent.stderr);
+    assert.match(sent.stdout, /queued for/);
+    assert.equal(pendingFiles(inboxDir(h.env, target)).length, 1);
+
+    const delivered = stopHook(h.env, target);
+    assert.equal(delivered.status, 0, delivered.stderr);
+    const context = JSON.parse(delivered.stdout.trim()).hookSpecificOutput
+      .additionalContext;
+    assert.match(context, /sandboxed hello/);
+    assert.match(context, new RegExp(sender.slice(0, 8)));
+    assert.deepEqual(pendingFiles(inboxDir(h.env, target)), []);
+  },
+);
+
+test("mail left in legacy inboxes is still delivered, and still expires", () => {
+  const h = homes();
+  const sid = "claude-legacy-inbox-session";
+  const roots = {
+    current: inboxDir(h.env, sid),
+    "0.3": legacyInboxDir(h.env, sid, "0.3"),
+    "0.2": legacyInboxDir(h.env, sid, "0.2"),
+  };
+
+  dropMessage(roots.current, baseMsg({ text: "from the current mailbox" }));
+  dropMessage(roots["0.3"], baseMsg({ text: "from the 0.3 crew home" }));
+  dropMessage(roots["0.2"], baseMsg({ text: "from the 0.2 claude home" }));
+  // Expiry has to reach legacy roots too, or stale mail sits there forever.
+  dropMessage(
+    roots["0.3"],
+    baseMsg({
+      text: "stale legacy message",
+      expiresAt: new Date(Date.now() - 60_000).toISOString(),
+    }),
+  );
+
+  const delivered = stopHook(h.env, sid);
+  assert.equal(delivered.status, 0, delivered.stderr);
+  const context = JSON.parse(delivered.stdout.trim()).hookSpecificOutput
+    .additionalContext;
+  assert.match(context, /from the current mailbox/);
+  assert.match(context, /from the 0.3 crew home/);
+  assert.match(context, /from the 0.2 claude home/);
+  assert.doesNotMatch(context, /stale legacy message/);
+  for (const [era, dir] of Object.entries(roots)) {
+    assert.deepEqual(pendingFiles(dir), [], `${era} inbox should be drained`);
+  }
+});
+
+test("concurrent drains deliver each message exactly once", async () => {
+  const h = homes();
+  const sid = "claude-concurrent-drain-session";
+  const count = 300; // enough mail that the drainers genuinely overlap
+  for (let i = 0; i < count; i++) {
+    dropMessage(inboxDir(h.env, sid), baseMsg({ text: `concurrent-${i}-marker` }));
+  }
+
+  // Spawning is not simultaneous — process startup jitter alone lets the first
+  // drainer finish before the last one starts, and then nothing is contended.
+  // Every drainer spins to a shared wall-clock instant and enters drainInbox
+  // together, which is the race the rename-to-claim exists to survive.
+  const startAt = Date.now() + 500;
+  const drainer = `
+    const { drainInbox } = require(${JSON.stringify(join(root, "dist", "mailbox.js"))});
+    while (Date.now() < Number(process.env.CREW_TEST_START_AT)) {}
+    const claimed = drainInbox(${JSON.stringify(sid)});
+    process.stdout.write(JSON.stringify(claimed.map((m) => m.text)));
+  `;
+  const drains = await Promise.all(
+    Array.from(
+      { length: 8 },
+      () =>
+        new Promise((done) => {
+          const child = spawn(process.execPath, ["-e", drainer], {
+            env: { ...h.env, CREW_TEST_START_AT: String(startAt) },
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          let stdout = "";
+          let stderr = "";
+          child.stdout.on("data", (c) => (stdout += c));
+          child.stderr.on("data", (c) => (stderr += c));
+          child.on("close", (status) => done({ status, stdout, stderr }));
+        }),
+    ),
+  );
+
+  const seen = [];
+  for (const drain of drains) {
+    assert.equal(drain.status, 0, drain.stderr);
+    seen.push(...JSON.parse(drain.stdout));
+  }
+  // Claiming renames before reading, so racing drainers split the inbox
+  // between them: nothing delivered twice, and nothing dropped on the floor.
+  assert.equal(new Set(seen).size, seen.length, "a message was delivered twice");
+  assert.equal(seen.length, count, `lost mail: only ${seen.length}/${count}`);
+  assert.deepEqual(pendingFiles(inboxDir(h.env, sid)), []);
+  // The race must have actually happened, or this proves nothing.
+  const winners = drains.filter((d) => JSON.parse(d.stdout).length > 0).length;
+  assert.ok(winners > 1, `only ${winners} drainer claimed anything; not contended`);
+});
+
+test(
+  "the default mailbox is a 0700 per-uid directory under /tmp",
+  { skip: process.platform === "win32" && "POSIX layout only" },
+  (t) => {
+    const sid = "crew-selftest-default-layout";
+    const env = { ...process.env };
+    delete env.CREW_INBOX_ROOT; // exercise the real default resolution
+    const probe = spawnSync(
+      process.execPath,
+      [
+        "-e",
+        `const { sendMessage } = require(${JSON.stringify(join(root, "dist", "mailbox.js"))});
+         const { inboxLocation } = require(${JSON.stringify(join(root, "dist", "home.js"))});
+         sendMessage(${JSON.stringify(sid)}, ${JSON.stringify(baseMsg())});
+         process.stdout.write(JSON.stringify(inboxLocation()));`,
+      ],
+      { env, encoding: "utf8" },
+    );
+    assert.equal(probe.status, 0, probe.stderr);
+    const location = JSON.parse(probe.stdout);
+    t.after(() => rmSync(join(location.root, sid), { recursive: true, force: true }));
+
+    assert.equal(location.base, `/tmp/crew-${process.getuid()}`);
+    assert.equal(location.root, join(location.base, "inbox"));
+    assert.equal(pendingFiles(join(location.root, sid)).length, 1);
+    const st = lstatSync(location.base);
+    assert.equal(st.isSymbolicLink(), false);
+    assert.equal(st.uid, process.getuid());
+    assert.equal(st.mode & 0o777, 0o700, "the per-user mailbox must be private");
+  },
+);
+
+test("a mailbox root crew does not own is refused, and nothing is queued", async (t) => {
+  const h = homes();
+  const sid = "claude-refused-root-session";
+  registerSession(h.env, sid, sleeper(t).pid);
+  const elsewhere = join(h.root, "elsewhere");
+  mkdirSync(elsewhere, { recursive: true });
+  symlinkSync(elsewhere, join(h.root, "linked-inbox"));
+
+  const sent = run(["send", sid.slice(0, 8), "should never be queued"], {
+    ...h.env,
+    CREW_INBOX_ROOT: join(h.root, "linked-inbox"),
+  });
+  assert.equal(sent.status, 1);
+  assert.match(sent.stderr, /symlink/);
+  assert.match(sent.stderr, /NOT queued/);
+  assert.doesNotMatch(sent.stdout, /queued for/);
+  assert.deepEqual(pendingFiles(join(elsewhere, sid)), []);
+});
