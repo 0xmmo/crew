@@ -16,6 +16,7 @@
  *   crew --hook          hook mode: emit other sessions as additionalContext JSON
  *   crew install-hook    wire crew into Claude Code, Codex, and OpenCode
  *   crew uninstall-hook  remove it
+ *   crew doctor          check hooks, binary, mailbox, registry; --fix repairs
  *   crew send <t> "msg"  message another session (delivered via its hook)
  *   crew send -k <t> ... kickstart: force the target to act on the message
  *   crew inbox           peek at this session's pending messages
@@ -31,6 +32,8 @@ const node_path_1 = require("node:path");
 const node_os_1 = require("node:os");
 const node_crypto_1 = require("node:crypto");
 const settings_1 = require("./settings");
+const doctor_1 = require("./doctor");
+const home_1 = require("./home");
 const mailbox_1 = require("./mailbox");
 const registry_1 = require("./registry");
 const transcript_1 = require("./transcript");
@@ -134,6 +137,9 @@ function printHelp() {
         "  crew install-hook     wire crew into Claude Code + Codex (hooks) and",
         "                        OpenCode (a generated plugin)",
         "  crew uninstall-hook   remove it from all three",
+        "  crew doctor           check that hooks, the binary on PATH, the mailbox,",
+        "                        and the registry are healthy; --fix repairs what",
+        "                        crew owns; --json for agents (exit 1 on failure)",
         "",
         "Messaging (delivered into the target agent's context via the hook):",
         '  crew send <t> "msg"   t = shortId prefix, pid, or cwd substring',
@@ -1006,6 +1012,26 @@ function runSettingsCommand(mode) {
     if (failed)
         process.exitCode = 1;
 }
+// ---------- doctor ----------
+function runDoctorCommand(args) {
+    let fix = false;
+    let json = false;
+    for (const a of args) {
+        if (a === "--fix")
+            fix = true;
+        else if (a === "--json")
+            json = true;
+        else {
+            process.stderr.write(`crew: unknown argument '${a}'\nusage: crew doctor [--fix] [--json]\n`);
+            process.exit(2);
+        }
+    }
+    const checks = (0, doctor_1.runDoctor)(fix);
+    const version = (0, home_1.crewVersion)();
+    process.stdout.write(json ? (0, doctor_1.renderDoctorJson)(checks, version) : (0, doctor_1.renderDoctorText)(checks, version));
+    if (checks.some((c) => c.status === "fail"))
+        process.exitCode = 1;
+}
 // ---------- main ----------
 function main() {
     const argv = process.argv.slice(2);
@@ -1016,6 +1042,10 @@ function main() {
     }
     if (argv[0] === "inbox") {
         runInbox();
+        return;
+    }
+    if (argv[0] === "doctor") {
+        runDoctorCommand(argv.slice(1));
         return;
     }
     const opts = parseArgs(argv);

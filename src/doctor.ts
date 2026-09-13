@@ -1,0 +1,416 @@
+/**
+ * doctor.ts — `crew doctor`: is this machine wired up so crew actually works?
+ *
+ * Every failure crew has produced in the field looked healthy from the
+ * outside: hooks silently not installed because npm skipped postinstall, a
+ * global install symlinked to a working tree, mail written where no reader
+ * looked, a sandbox denying the mailbox. Each check here is one of those
+ * lessons, and each fix is the command that repaired it. Report-only by
+ * default; `--fix` applies the repairs crew owns (its own hooks, its own
+ * mailbox, its own registry) and never touches anything else.
+ */
+
+import { execFileSync } from "node:child_process";
+import {
+  accessSync,
+  constants as fsConstants,
+  existsSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { delimiter, join } from "node:path";
+import {
+  AGENTS,
+  AGENT_LABELS,
+  Agent,
+  HookState,
+  hookState,
+  installHook,
+  settingsPath,
+  tildify,
+} from "./settings";
+import {
+  ensureMailboxRoot,
+  inspectMailbox,
+  legacyPending,
+  pruneInboxes,
+} from "./mailbox";
+import { inspectRegistry, registeredSessions } from "./registry";
+import { opencodeDbPath } from "./opencode";
+
+export type Status = "ok" | "warn" | "fail" | "fixed";
+
+export interface Check {
+  id: string;
+  label: string;
+  status: Status;
+  detail: string;
+  /** The command a human runs to repair it, when there is one. */
+  fix?: string;
+}
+
+interface Probe {
+  id: string;
+  label: string;
+  run(): { status: Status; detail: string; fix?: string };
+  /** Applied under --fix, then `run` is re-evaluated. */
+  repair?(): void;
+}
+
+const MIN_NODE_MAJOR = 18;
+
+function nodeCheck(): Probe {
+  return {
+    id: "node",
+    label: "Node.js",
+    run() {
+      const major = parseInt(process.versions.node.split(".")[0], 10);
+      return major >= MIN_NODE_MAJOR
+        ? { status: "ok", detail: `v${process.versions.node} at ${process.execPath}` }
+        : {
+            status: "fail",
+            detail: `v${process.versions.node}; crew needs ${MIN_NODE_MAJOR}+`,
+          };
+    },
+  };
+}
+
+function isExecutable(path: string): boolean {
+  try {
+    accessSync(path, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function realpathOrSelf(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+/**
+ * Which `crew` do hooks actually run? The hook command is the bare word
+ * `crew`, so whatever is first on PATH wins — and that may not be this build.
+ */
+function binaryCheck(): Probe {
+  return {
+    id: "binary",
+    label: "crew on PATH",
+    run() {
+      const dirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+      const found = dirs
+        .map((d) => join(d, "crew"))
+        .filter((p) => existsSync(p) && isExecutable(p));
+      if (found.length === 0) {
+        return {
+          status: "fail",
+          detail: "no `crew` on PATH; hooks run `crew --hook` and will fail",
+          fix: "npm install -g @0xmmo/crew",
+        };
+      }
+      const running = realpathOrSelf(join(__dirname, "crew.js"));
+      const first = realpathOrSelf(found[0]);
+      const notes: string[] = [];
+      let status: Status = "ok";
+      if (first !== running) {
+        status = "warn";
+        notes.push(
+          `first on PATH is ${tildify(found[0])} → ${tildify(first)}, ` +
+            `but this run is ${tildify(running)}`,
+        );
+      }
+      if (!/[\\/]node_modules[\\/]/.test(first)) {
+        status = "warn";
+        notes.push(
+          `${tildify(first)} is outside node_modules, so the global install ` +
+            "is linked to a working tree; a mid-edit checkout breaks every " +
+            "session's hook. Install a copy: `npm pack && npm i -g ./<tarball>`",
+        );
+      }
+      const others = found.slice(1).map(tildify);
+      if (others.length > 0) {
+        notes.push(`shadowed: ${others.join(", ")}`);
+      }
+      return {
+        status,
+        detail: [`${tildify(found[0])}`, ...notes].join("; "),
+      };
+    },
+  };
+}
+
+function ignoreScripts(): boolean {
+  const rc = process.env.NPM_CONFIG_USERCONFIG || join(homedir(), ".npmrc");
+  try {
+    return /^\s*ignore-scripts\s*=\s*true\s*$/m.test(readFileSync(rc, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+function hookCheck(agent: Agent): Probe {
+  const label = AGENT_LABELS[agent];
+  return {
+    id: `hook:${agent}`,
+    label: `${label} hook`,
+    run() {
+      const path = tildify(settingsPath(agent));
+      const state: HookState = hookState(agent);
+      const fix = "crew install-hook";
+      switch (state) {
+        case "installed":
+          return { status: "ok", detail: path };
+        case "partial":
+          return {
+            status: "warn",
+            detail: `${path} wires crew into some events but not all four`,
+            fix,
+          };
+        case "stale":
+          return {
+            status: "warn",
+            detail: `${path} was generated by an older crew; re-render it`,
+            fix,
+          };
+        case "foreign":
+          return {
+            status: "fail",
+            detail: `${path} exists but crew didn't generate it; move it aside`,
+          };
+        case "unreadable":
+          return {
+            status: "fail",
+            detail: `${path} isn't valid JSON; crew won't touch it until it is`,
+          };
+        case "missing": {
+          const why = ignoreScripts()
+            ? " (npm has ignore-scripts=true, so postinstall never ran)"
+            : "";
+          return { status: "fail", detail: `not wired${why}`, fix };
+        }
+      }
+    },
+    repair() {
+      const state = hookState(agent);
+      if (state === "foreign" || state === "unreadable") return; // not ours
+      installHook(agent);
+    },
+  };
+}
+
+function mailboxCheck(): Probe {
+  return {
+    id: "mailbox",
+    label: "Mailbox",
+    run() {
+      const r = inspectMailbox();
+      const where = tildify(r.root);
+      if (r.errors.length > 0) {
+        return {
+          status: "fail",
+          detail: r.errors.join("; "),
+          fix: "set CREW_INBOX_ROOT to a writable directory you own",
+        };
+      }
+      if (r.warnings.length > 0) {
+        return { status: "warn", detail: r.warnings.join("; "), fix: "crew doctor --fix" };
+      }
+      return {
+        status: "ok",
+        detail: r.absent ? `${where} (created on first send)` : `${where} writable`,
+      };
+    },
+    repair() {
+      ensureMailboxRoot();
+    },
+  };
+}
+
+function legacyMailCheck(): Probe {
+  return {
+    id: "mailbox:legacy",
+    label: "Legacy inboxes",
+    run() {
+      const pending = legacyPending();
+      if (pending.length === 0) return { status: "ok", detail: "empty" };
+      return {
+        status: "warn",
+        detail: pending
+          .map((p) => `${p.count} message(s) in ${tildify(p.root)}`)
+          .join("; ") + "; still delivered, expired ones are swept on --fix",
+        fix: "crew doctor --fix",
+      };
+    },
+    repair() {
+      pruneInboxes();
+    },
+  };
+}
+
+function registryCheck(): Probe {
+  return {
+    id: "registry",
+    label: "Session registry",
+    run() {
+      const r = inspectRegistry();
+      const where = tildify(r.root);
+      const parts = [`${r.live} live`];
+      if (r.stale) parts.push(`${r.stale} stale`);
+      if (r.corrupt) parts.push(`${r.corrupt} unreadable`);
+      const detail = `${where}: ${parts.join(", ")}`;
+      return r.stale || r.corrupt
+        ? { status: "warn", detail, fix: "crew doctor --fix" }
+        : { status: "ok", detail };
+    },
+    repair() {
+      registeredSessions(); // prunes as a side effect
+    },
+  };
+}
+
+function claudeSessionsCheck(): Probe {
+  return {
+    id: "claude:sessions",
+    label: "Claude Code sessions dir",
+    run() {
+      const home =
+        process.env.CLAUDE_CONFIG_DIR ||
+        process.env.CLAUDE_HOME ||
+        join(homedir(), ".claude");
+      const dir = join(home, "sessions");
+      if (!existsSync(dir)) {
+        return {
+          status: "warn",
+          detail: `${tildify(dir)} not found; Claude Code sessions won't be listed until one runs`,
+        };
+      }
+      try {
+        const n = readdirSync(dir).filter((f) => f.endsWith(".json")).length;
+        return { status: "ok", detail: `${tildify(dir)}: ${n} record(s)` };
+      } catch (err) {
+        return {
+          status: "fail",
+          detail: `${tildify(dir)}: ${(err as Error).message}`,
+        };
+      }
+    },
+  };
+}
+
+function sqliteCheck(): Probe {
+  return {
+    id: "opencode:sqlite",
+    label: "OpenCode transcripts",
+    run() {
+      if (hookState("opencode") === "missing") {
+        return { status: "ok", detail: "skipped (OpenCode plugin not installed)" };
+      }
+      let version: string;
+      try {
+        version = execFileSync("sqlite3", ["-version"], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+        })
+          .trim()
+          .split(" ")[0];
+      } catch {
+        return {
+          status: "warn",
+          detail:
+            "sqlite3 not on PATH; OpenCode sessions list as status-only, no transcript tail",
+          fix: "install sqlite3 (macOS ships it; `apt install sqlite3` elsewhere)",
+        };
+      }
+      const db = opencodeDbPath();
+      return existsSync(db)
+        ? { status: "ok", detail: `sqlite3 ${version}, ${tildify(db)}` }
+        : {
+            status: "warn",
+            detail: `sqlite3 ${version}; ${tildify(db)} not found yet (created by OpenCode's first run)`,
+          };
+    },
+  };
+}
+
+function probes(): Probe[] {
+  return [
+    nodeCheck(),
+    binaryCheck(),
+    ...AGENTS.map(hookCheck),
+    mailboxCheck(),
+    legacyMailCheck(),
+    registryCheck(),
+    claudeSessionsCheck(),
+    sqliteCheck(),
+  ];
+}
+
+/** Run every check; with `fix`, repair what crew owns and re-check. */
+export function runDoctor(fix: boolean): Check[] {
+  const out: Check[] = [];
+  for (const p of probes()) {
+    let r: ReturnType<Probe["run"]>;
+    try {
+      r = p.run();
+    } catch (err) {
+      r = { status: "fail", detail: `check crashed: ${(err as Error).message}` };
+    }
+    if (fix && p.repair && r.status !== "ok") {
+      try {
+        p.repair();
+        const again = p.run();
+        r =
+          again.status === "ok"
+            ? { ...again, status: "fixed", detail: `${again.detail} (was: ${r.detail})` }
+            : again;
+      } catch (err) {
+        r = {
+          status: "fail",
+          detail: `${r.detail}; fix failed: ${(err as Error).message}`,
+          fix: r.fix,
+        };
+      }
+    }
+    out.push({ id: p.id, label: p.label, ...r });
+  }
+  return out;
+}
+
+const MARK: Record<Status, string> = {
+  ok: "✓",
+  fixed: "✓",
+  warn: "⚠",
+  fail: "✗",
+};
+
+export function renderDoctorText(checks: Check[], version: string): string {
+  const width = Math.max(...checks.map((c) => c.label.length));
+  const lines = [`crew ${version}`, ""];
+  for (const c of checks) {
+    const tag = c.status === "fixed" ? " (fixed)" : "";
+    lines.push(`${MARK[c.status]} ${c.label.padEnd(width)}  ${c.detail}${tag}`);
+    if (c.fix && c.status !== "ok" && c.status !== "fixed") {
+      lines.push(`  ${"".padEnd(width)}  → ${c.fix}`);
+    }
+  }
+  const fails = checks.filter((c) => c.status === "fail").length;
+  const warns = checks.filter((c) => c.status === "warn").length;
+  const fixed = checks.filter((c) => c.status === "fixed").length;
+  const summary: string[] = [];
+  if (fails) summary.push(`${fails} failing`);
+  if (warns) summary.push(`${warns} warning(s)`);
+  if (fixed) summary.push(`${fixed} fixed`);
+  lines.push("", summary.length ? summary.join(", ") : "all checks passed");
+  return lines.join("\n") + "\n";
+}
+
+export function renderDoctorJson(checks: Check[], version: string): string {
+  const ok = checks.every((c) => c.status !== "fail");
+  return JSON.stringify({ schema: 1, version, ok, checks }) + "\n";
+}

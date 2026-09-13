@@ -15,6 +15,9 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MailboxError = exports.DEFAULT_TTL_MS = void 0;
+exports.inspectMailbox = inspectMailbox;
+exports.ensureMailboxRoot = ensureMailboxRoot;
+exports.legacyPending = legacyPending;
 exports.sendMessage = sendMessage;
 exports.peekInbox = peekInbox;
 exports.pendingCount = pendingCount;
@@ -88,6 +91,97 @@ function secureDir(dir) {
             throw mailboxError(dir, err);
         }
     }
+}
+/**
+ * Look at the mailbox without touching it, for `crew doctor`. Mirrors the
+ * rules `secureDir` enforces, minus the mkdir and chmod side effects, plus a
+ * write probe so a sandbox denial shows up here and not on the first send.
+ */
+function inspectMailbox() {
+    const { base, root } = (0, home_1.inboxLocation)();
+    const report = {
+        base,
+        root,
+        absent: false,
+        errors: [],
+        warnings: [],
+    };
+    const uid = typeof process.getuid === "function" ? process.getuid() : null;
+    const dirs = base === root ? [root] : [base, root];
+    let existing = 0;
+    for (const dir of dirs) {
+        let st;
+        try {
+            st = (0, node_fs_1.lstatSync)(dir);
+        }
+        catch (err) {
+            if (err.code === "ENOENT")
+                continue;
+            report.errors.push(`${dir}: ${err.message}`);
+            continue;
+        }
+        existing++;
+        if (st.isSymbolicLink()) {
+            report.errors.push(`${dir} is a symlink; crew refuses to follow it`);
+            continue;
+        }
+        if (!st.isDirectory()) {
+            report.errors.push(`${dir} is not a directory`);
+            continue;
+        }
+        if (uid !== null && st.uid !== uid) {
+            report.errors.push(`${dir} is owned by uid ${st.uid}, not ${uid}`);
+            continue;
+        }
+        if (uid !== null && (st.mode & 0o077) !== 0) {
+            report.warnings.push(`${dir} is mode ${(st.mode & 0o777).toString(8)}, should be 700`);
+        }
+    }
+    if (existing === 0) {
+        report.absent = true;
+        // Can we create it at all? Probe the parent the same way mkdir would.
+        try {
+            (0, node_fs_1.accessSync)((0, node_path_1.dirname)(base), node_fs_1.constants.W_OK);
+        }
+        catch {
+            report.errors.push(`${(0, node_path_1.dirname)(base)} is not writable; sends will fail`);
+        }
+        return report;
+    }
+    if (report.errors.length === 0) {
+        const probe = (0, node_path_1.join)(root, `.doctor-${process.pid}-${Date.now()}`);
+        try {
+            (0, node_fs_1.mkdirSync)(root, { recursive: true });
+            (0, node_fs_1.writeFileSync)(probe, "");
+            (0, node_fs_1.unlinkSync)(probe);
+        }
+        catch (err) {
+            report.errors.push(`cannot write ${root} (${err.code ?? err})`);
+        }
+    }
+    return report;
+}
+/** Create and lock down the mailbox root now instead of on the first send. */
+function ensureMailboxRoot() {
+    const { base, root } = (0, home_1.inboxLocation)();
+    for (const d of base === root ? [root] : [base, root])
+        secureDir(d);
+}
+/** Undelivered mail still sitting in inboxes written by crew <= 0.3.x. */
+function legacyPending() {
+    return (0, home_1.legacyInboxRoots)()
+        .map((root) => ({
+        root,
+        count: listDirs(root).reduce((n, sid) => {
+            try {
+                return (n + (0, node_fs_1.readdirSync)((0, node_path_1.join)(root, sid)).filter((f) => f.endsWith(".json")).length);
+            }
+            catch {
+                return n;
+            }
+        }, 0),
+    }))
+        .filter((r) => r.count > 0);
 }
 function inboxDir(sid, root) {
     return (0, node_path_1.join)(root, (0, home_1.safeSessionId)(sid));

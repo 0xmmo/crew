@@ -199,6 +199,41 @@ export function removeSession(sid: string): void {
 }
 
 /** List live hook-registered sessions and prune dead/stale records. */
+export interface RegistryReport {
+  root: string;
+  live: number;
+  /** Records whose process is gone or whose lastSeen is past the cutoff. */
+  stale: number;
+  /** Files that aren't valid session records. */
+  corrupt: number;
+}
+
+/** Count the registry without pruning it, for `crew doctor`. */
+export function inspectRegistry(): RegistryReport {
+  const report: RegistryReport = { root: SESSION_ROOT, live: 0, stale: 0, corrupt: 0 };
+  let files: string[];
+  try {
+    files = readdirSync(SESSION_ROOT).filter((file) => file.endsWith(".json"));
+  } catch {
+    return report;
+  }
+  const cutoff = Date.now() - MAX_STALE_MS;
+  for (const file of files) {
+    const session = readRegistered(join(SESSION_ROOT, file));
+    if (!session) {
+      report.corrupt++;
+      continue;
+    }
+    const seen = Date.parse(session.lastSeen ?? "");
+    if (!Number.isFinite(seen) || seen < cutoff || !processExists(session.pid)) {
+      report.stale++;
+    } else {
+      report.live++;
+    }
+  }
+  return report;
+}
+
 export function registeredSessions(): RegisteredSession[] {
   let files: string[];
   try {

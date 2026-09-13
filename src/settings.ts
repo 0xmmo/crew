@@ -20,7 +20,9 @@ import {
   OPENCODE_PLUGIN_MARKER,
   opencodePluginPath,
   opencodePluginSource,
+  opencodePluginVersion,
 } from "./opencode";
+import { crewVersion } from "./home";
 
 export type Agent = "claude" | "codex" | "opencode";
 
@@ -103,6 +105,52 @@ function ownsOpencodePlugin(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Fine-grained wiring state, for `crew doctor`. Never throws.
+ *   installed  — wired and current
+ *   partial    — Claude/Codex: wired into some events but not all
+ *   stale      — OpenCode: crew's plugin, but an older render than this build
+ *   foreign    — OpenCode: a plugin at our path that crew didn't generate
+ *   unreadable — Claude/Codex: settings file exists but isn't parseable JSON
+ *   missing    — nothing wired
+ */
+export type HookState =
+  | "installed"
+  | "partial"
+  | "stale"
+  | "foreign"
+  | "unreadable"
+  | "missing";
+
+export function hookState(agent: Agent = "claude"): HookState {
+  if (agent === "opencode") {
+    const path = opencodePluginPath();
+    if (!existsSync(path)) return "missing";
+    if (!ownsOpencodePlugin(path)) return "foreign";
+    // Baked paths may legitimately differ from this build's (the plugin falls
+    // back to PATH when they die); only an older template counts as stale.
+    try {
+      return opencodePluginVersion(readFileSync(path, "utf8")) === crewVersion()
+        ? "installed"
+        : "stale";
+    } catch {
+      return "unreadable";
+    }
+  }
+  let hooks: any;
+  try {
+    hooks = readSettings(settingsPath(agent)).hooks;
+  } catch {
+    return "unreadable";
+  }
+  if (!hooks || typeof hooks !== "object") return "missing";
+  const wired = HOOK_EVENTS.filter(
+    (event) => Array.isArray(hooks[event]) && hasCrewHook(hooks[event]),
+  ).length;
+  if (wired === 0) return "missing";
+  return wired === HOOK_EVENTS.length ? "installed" : "partial";
 }
 
 /** True if crew is wired into any supported event for an agent. Never throws. */

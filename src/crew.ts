@@ -15,6 +15,7 @@
  *   crew --hook          hook mode: emit other sessions as additionalContext JSON
  *   crew install-hook    wire crew into Claude Code, Codex, and OpenCode
  *   crew uninstall-hook  remove it
+ *   crew doctor          check hooks, binary, mailbox, registry; --fix repairs
  *   crew send <t> "msg"  message another session (delivered via its hook)
  *   crew send -k <t> ... kickstart: force the target to act on the message
  *   crew inbox           peek at this session's pending messages
@@ -47,6 +48,8 @@ import {
   tildify,
   uninstallHook,
 } from "./settings";
+import { renderDoctorJson, renderDoctorText, runDoctor } from "./doctor";
+import { crewVersion } from "./home";
 import {
   DEFAULT_TTL_MS,
   MailboxError,
@@ -194,6 +197,9 @@ function printHelp(): void {
       "  crew install-hook     wire crew into Claude Code + Codex (hooks) and",
       "                        OpenCode (a generated plugin)",
       "  crew uninstall-hook   remove it from all three",
+      "  crew doctor           check that hooks, the binary on PATH, the mailbox,",
+      "                        and the registry are healthy; --fix repairs what",
+      "                        crew owns; --json for agents (exit 1 on failure)",
       "",
       "Messaging (delivered into the target agent's context via the hook):",
       '  crew send <t> "msg"   t = shortId prefix, pid, or cwd substring',
@@ -1112,6 +1118,29 @@ function runSettingsCommand(mode: "install-hook" | "uninstall-hook"): void {
   if (failed) process.exitCode = 1;
 }
 
+// ---------- doctor ----------
+
+function runDoctorCommand(args: string[]): void {
+  let fix = false;
+  let json = false;
+  for (const a of args) {
+    if (a === "--fix") fix = true;
+    else if (a === "--json") json = true;
+    else {
+      process.stderr.write(
+        `crew: unknown argument '${a}'\nusage: crew doctor [--fix] [--json]\n`,
+      );
+      process.exit(2);
+    }
+  }
+  const checks = runDoctor(fix);
+  const version = crewVersion();
+  process.stdout.write(
+    json ? renderDoctorJson(checks, version) : renderDoctorText(checks, version),
+  );
+  if (checks.some((c) => c.status === "fail")) process.exitCode = 1;
+}
+
 // ---------- main ----------
 
 function main(): void {
@@ -1123,6 +1152,10 @@ function main(): void {
   }
   if (argv[0] === "inbox") {
     runInbox();
+    return;
+  }
+  if (argv[0] === "doctor") {
+    runDoctorCommand(argv.slice(1));
     return;
   }
   const opts = parseArgs(argv);

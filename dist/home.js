@@ -15,6 +15,7 @@
  * so there is exactly one definition of each location.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.crewVersion = crewVersion;
 exports.crewHome = crewHome;
 exports.legacyCrewHome = legacyCrewHome;
 exports.inboxLocation = inboxLocation;
@@ -22,8 +23,18 @@ exports.inboxRoot = inboxRoot;
 exports.legacyInboxRoots = legacyInboxRoots;
 exports.inboxRoots = inboxRoots;
 exports.safeSessionId = safeSessionId;
+const node_fs_1 = require("node:fs");
 const node_os_1 = require("node:os");
 const node_path_1 = require("node:path");
+/** This build's version, from the package.json one level above dist/. */
+function crewVersion() {
+    try {
+        return JSON.parse((0, node_fs_1.readFileSync)((0, node_path_1.join)(__dirname, "..", "package.json"), "utf8")).version;
+    }
+    catch {
+        return "unknown";
+    }
+}
 /** Product-neutral config and session registry, shared by all three products. */
 function crewHome() {
     return (0, node_path_1.resolve)(process.env.CREW_HOME || (0, node_path_1.join)((0, node_os_1.homedir)(), ".crew"));

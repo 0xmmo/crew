@@ -14,8 +14,20 @@
  * so there is exactly one definition of each location.
  */
 
+import { readFileSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
+
+/** This build's version, from the package.json one level above dist/. */
+export function crewVersion(): string {
+  try {
+    return JSON.parse(
+      readFileSync(join(__dirname, "..", "package.json"), "utf8"),
+    ).version;
+  } catch {
+    return "unknown";
+  }
+}
 
 /** Product-neutral config and session registry, shared by all three products. */
 export function crewHome(): string {

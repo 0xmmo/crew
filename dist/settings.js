@@ -11,6 +11,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.HOOK_EVENTS = exports.HOOK_COMMAND = exports.AGENT_LABELS = exports.AGENTS = void 0;
 exports.tildify = tildify;
 exports.settingsPath = settingsPath;
+exports.hookState = hookState;
 exports.hookInstalled = hookInstalled;
 exports.installHook = installHook;
 exports.uninstallHook = uninstallHook;
@@ -18,6 +19,7 @@ const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
 const node_os_1 = require("node:os");
 const opencode_1 = require("./opencode");
+const home_1 = require("./home");
 exports.AGENTS = ["claude", "codex", "opencode"];
 exports.AGENT_LABELS = {
     claude: "Claude Code",
@@ -78,6 +80,38 @@ function ownsOpencodePlugin(path) {
     catch {
         return false;
     }
+}
+function hookState(agent = "claude") {
+    if (agent === "opencode") {
+        const path = (0, opencode_1.opencodePluginPath)();
+        if (!(0, node_fs_1.existsSync)(path))
+            return "missing";
+        if (!ownsOpencodePlugin(path))
+            return "foreign";
+        // Baked paths may legitimately differ from this build's (the plugin falls
+        // back to PATH when they die); only an older template counts as stale.
+        try {
+            return (0, opencode_1.opencodePluginVersion)((0, node_fs_1.readFileSync)(path, "utf8")) === (0, home_1.crewVersion)()
+                ? "installed"
+                : "stale";
+        }
+        catch {
+            return "unreadable";
+        }
+    }
+    let hooks;
+    try {
+        hooks = readSettings(settingsPath(agent)).hooks;
+    }
+    catch {
+        return "unreadable";
+    }
+    if (!hooks || typeof hooks !== "object")
+        return "missing";
+    const wired = exports.HOOK_EVENTS.filter((event) => Array.isArray(hooks[event]) && hasCrewHook(hooks[event])).length;
+    if (wired === 0)
+        return "missing";
+    return wired === exports.HOOK_EVENTS.length ? "installed" : "partial";
 }
 /** True if crew is wired into any supported event for an agent. Never throws. */
 function hookInstalled(agent = "claude") {

@@ -14,6 +14,7 @@ exports.processExists = processExists;
 exports.hookAgent = hookAgent;
 exports.recordHookSession = recordHookSession;
 exports.removeSession = removeSession;
+exports.inspectRegistry = inspectRegistry;
 exports.registeredSessions = registeredSessions;
 const node_fs_1 = require("node:fs");
 const node_child_process_1 = require("node:child_process");
@@ -173,7 +174,33 @@ function removeSession(sid) {
         // already gone or never registered
     }
 }
-/** List live hook-registered sessions and prune dead/stale records. */
+/** Count the registry without pruning it, for `crew doctor`. */
+function inspectRegistry() {
+    const report = { root: SESSION_ROOT, live: 0, stale: 0, corrupt: 0 };
+    let files;
+    try {
+        files = (0, node_fs_1.readdirSync)(SESSION_ROOT).filter((file) => file.endsWith(".json"));
+    }
+    catch {
+        return report;
+    }
+    const cutoff = Date.now() - MAX_STALE_MS;
+    for (const file of files) {
+        const session = readRegistered((0, node_path_1.join)(SESSION_ROOT, file));
+        if (!session) {
+            report.corrupt++;
+            continue;
+        }
+        const seen = Date.parse(session.lastSeen ?? "");
+        if (!Number.isFinite(seen) || seen < cutoff || !processExists(session.pid)) {
+            report.stale++;
+        }
+        else {
+            report.live++;
+        }
+    }
+    return report;
+}
 function registeredSessions() {
     let files;
     try {
